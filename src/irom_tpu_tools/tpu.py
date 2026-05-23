@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import base64
-from dataclasses import dataclass
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from typing import Literal
 
 from .config import TPUEnvConfig
-from .ssh import SSHOptions
-from .ssh import gcloud_tpu_ssh
-from .ssh import gcloud_tpu_ssh_stream
-from .ssh import run_streaming
-from .ssh import run_with_timeout
+from .ssh import (
+    SSHOptions,
+    gcloud_tpu_ssh,
+    gcloud_tpu_ssh_stream,
+    run_streaming,
+    run_with_timeout,
+)
 
 
 def _ts() -> str:
@@ -43,7 +44,9 @@ def resolve_tpu(
     raise RuntimeError(f"TPU '{name}' not found in any configured zone ({configured})")
 
 
-def _gcloud_describe_state(project: str, zone: str, name: str, timeout_s: int) -> tuple[DescribeRC, str]:
+def _gcloud_describe_state(
+    project: str, zone: str, name: str, timeout_s: int
+) -> tuple[DescribeRC, str]:
     proc = run_with_timeout(
         timeout_s,
         int(os.environ.get("SSH_KILL_AFTER", 5)),
@@ -124,12 +127,17 @@ class TPUManager:
         tpu_name = name or self.tpu_name
         if not tpu_name:
             raise RuntimeError("No TPU name provided and TPU_NAME not set")
-        ver, zone = resolve_tpu(tpu_name, self.env.tpu_project, self.env.zones, self.describe_timeout_s)
+        ver, zone = resolve_tpu(
+            tpu_name, self.env.tpu_project, self.env.zones, self.describe_timeout_s
+        )
         return self.for_tpu(tpu_name, ver, zone)
 
     def describe(self, version: TPUVersion) -> str:
         rc, state = _gcloud_describe_state(
-            self.env.tpu_project, self._zone_for(version), self.tpu_name, self.describe_timeout_s
+            self.env.tpu_project,
+            self._zone_for(version),
+            self.tpu_name,
+            self.describe_timeout_s,
         )
         if rc == 2:
             raise RuntimeError(f"Invalid zone for {version}: {self._zone_for(version)}")
@@ -158,7 +166,53 @@ class TPUManager:
         )
         return rc == 0
 
-    def create(self, version: Literal["v4", "v5", "v6"], *, tpu_num: int, topology: str | None = None) -> bool:
+    def stop(self, version: Literal["v4", "v5", "v6"]) -> bool:
+        zone = self._zone_for(version)
+        rc = run_streaming(
+            [
+                "gcloud",
+                "alpha",
+                "compute",
+                "tpus",
+                "tpu-vm",
+                "stop",
+                self.tpu_name,
+                "--zone",
+                zone,
+                "--project",
+                self.env.tpu_project,
+                "--quiet",
+            ]
+        )
+        return rc == 0
+
+    def start(self, version: Literal["v4", "v5", "v6"]) -> bool:
+        zone = self._zone_for(version)
+        rc = run_streaming(
+            [
+                "gcloud",
+                "alpha",
+                "compute",
+                "tpus",
+                "tpu-vm",
+                "start",
+                self.tpu_name,
+                "--zone",
+                zone,
+                "--project",
+                self.env.tpu_project,
+                "--quiet",
+            ]
+        )
+        return rc == 0
+
+    def create(
+        self,
+        version: Literal["v4", "v5", "v6"],
+        *,
+        tpu_num: int,
+        topology: str | None = None,
+    ) -> bool:
         zone = self._zone_for(version)
         sa = self.env.service_account_for_zone(zone)
         common = [
@@ -180,19 +234,46 @@ class TPUManager:
         if version == "v4":
             if not topology:
                 raise ValueError("topology is required for v4")
-            args = [*common, "--type", "v4", "--topology", topology, "--version", "tpu-ubuntu2204-base"]
+            args = [
+                *common,
+                "--type",
+                "v4",
+                "--topology",
+                topology,
+                "--version",
+                "tpu-ubuntu2204-base",
+            ]
         elif version == "v5":
-            accel = {8: "v5litepod-8", 16: "v5litepod-16", 32: "v5litepod-32", 64: "v5litepod-64"}.get(tpu_num)
+            accel = {
+                8: "v5litepod-8",
+                16: "v5litepod-16",
+                32: "v5litepod-32",
+                64: "v5litepod-64",
+            }.get(tpu_num)
             if not accel:
                 raise ValueError("Unsupported TPU_NUM for v5: expected 16/32/64")
-            args = [*common, "--accelerator-type", accel, "--version", "v2-alpha-tpuv5-lite"]
+            args = [
+                *common,
+                "--accelerator-type",
+                accel,
+                "--version",
+                "v2-alpha-tpuv5-lite",
+            ]
         else:  # v6
-            args = [*common, "--accelerator-type", f"v6e-{tpu_num}", "--version", "v2-alpha-tpuv6e"]
+            args = [
+                *common,
+                "--accelerator-type",
+                f"v6e-{tpu_num}",
+                "--version",
+                "v2-alpha-tpuv6e",
+            ]
 
         rc = run_streaming(args)
         return rc == 0
 
-    def tmux(self, version: Literal["v4", "v5", "v6"], *, cmd: str, session: str = "tpu") -> bool:
+    def tmux(
+        self, version: Literal["v4", "v5", "v6"], *, cmd: str, session: str = "tpu"
+    ) -> bool:
         # Ensure tmux exists and start/send in a session across all workers
         line = f"set -eo pipefail; export PYTHONUNBUFFERED=1; {cmd} 2>&1 | tee -a $LOG"
         remote = (
@@ -220,7 +301,13 @@ class TPUManager:
             == 0
         )
 
-    def raw(self, version: Literal["v4", "v5", "v6"], *, cmd: str, worker: str | None = "all") -> int:
+    def raw(
+        self,
+        version: Literal["v4", "v5", "v6"],
+        *,
+        cmd: str,
+        worker: str | None = "all",
+    ) -> int:
         """Run a raw command on TPU worker(s) without tmux.
 
         Mirrors `v4 "<cmd>"` style helpers from ~/.tpu_funcs.sh.
@@ -238,20 +325,36 @@ class TPUManager:
         """Open an interactive SSH shell on a single worker (no tmux)."""
         zone = self._zone_for(version)
         args = [
-            "gcloud", "alpha", "compute", "tpus", "tpu-vm", "ssh",
+            "gcloud",
+            "alpha",
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "ssh",
             self.tpu_name,
-            "--project", self.env.tpu_project,
-            "--zone", zone,
-            "--worker", str(worker),
+            "--project",
+            self.env.tpu_project,
+            "--zone",
+            zone,
+            "--worker",
+            str(worker),
             "--",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "UserKnownHostsFile=/dev/null",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
         ]
         if self.ssh.forward_agent and os.environ.get("SSH_AUTH_SOCK"):
             args.append("-A")
         return run_streaming(args)
 
-    def attach(self, version: Literal["v4", "v5", "v6"], *, session: str = "tpu", worker: int = 0) -> int:
+    def attach(
+        self,
+        version: Literal["v4", "v5", "v6"],
+        *,
+        session: str = "tpu",
+        worker: int = 0,
+    ) -> int:
         # Use exec with `tmux new -As` to attach-or-create without running extra commands afterward
         return gcloud_tpu_ssh_stream(
             tpu_name=self.tpu_name,
@@ -267,29 +370,92 @@ class TPUManager:
             no_shell_rc=True,
         )
 
-    def tail_log(self, version: Literal["v4", "v5", "v6"], *, worker: int = 0) -> int:
-        # Prefer tmux's LOG environment for the current session; fallback to newest log file.
-        session = "tpu"
-        cmd = (
+    def _tail_log_cmd(self, *, lines: int, follow: bool, session: str = "tpu") -> str:
+        """Build a remote shell snippet that resolves the latest training log
+        and tails it. With follow=True it streams indefinitely; otherwise it
+        prints the last `lines` and exits.
+        """
+        tail_args = f"-n {int(lines)}" + (" -f" if follow else "")
+        return (
             f"SESSION={shlex.quote(session)}; "
-            # 1. Try tmux LOG env var
             'LOG_FILE="$(tmux show-environment -t "$SESSION" LOG 2>/dev/null | sed -n "s/^LOG=//p")"; '
-            '[ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] && { tail -n 1000 -f "$LOG_FILE"; exit $?; }; '
-            # 2. Try repo-specific logs dir
-            f'LOG_DIR=$HOME/{self.env.gh_repo_name}/logs; '
+            f'[ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] && {{ tail {tail_args} "$LOG_FILE"; exit $?; }}; '
+            f"LOG_DIR=$HOME/{self.env.gh_repo_name}/logs; "
             'if [ -d "$LOG_DIR" ]; then '
             '  F="$(ls -1t "$LOG_DIR" | head -n1 || true)"; '
-            '  [ -n "$F" ] && { tail -n 1000 -f "$LOG_DIR/$F"; exit $?; }; '
-            'fi; '
-            # 3. Try any logs dir under $HOME
-            'for d in $HOME/*/logs; do '
+            f'  [ -n "$F" ] && {{ tail {tail_args} "$LOG_DIR/$F"; exit $?; }}; '
+            "fi; "
+            "for d in $HOME/*/logs; do "
             '  [ -d "$d" ] || continue; '
             '  F="$(ls -1t "$d" | head -n1 || true)"; '
-            '  [ -n "$F" ] && { echo "[found log in $d]"; tail -n 1000 -f "$d/$F"; exit $?; }; '
-            'done; '
+            f'  [ -n "$F" ] && {{ echo "[found log in $d]"; tail {tail_args} "$d/$F"; exit $?; }}; '
+            "done; "
             'echo "[ERROR] No log files found"; exit 1'
         )
+
+    def tail_log(self, version: Literal["v4", "v5", "v6"], *, worker: int = 0) -> int:
+        # Prefer tmux's LOG environment for the current session; fallback to newest log file.
         rc = gcloud_tpu_ssh_stream(
+            tpu_name=self.tpu_name,
+            project=self.env.tpu_project,
+            zone=self._zone_for(version),
+            worker=str(worker),
+            command=self._tail_log_cmd(lines=1000, follow=True),
+            ssh=self.ssh,
+        )
+        return rc
+
+    def output_snapshot(
+        self,
+        version: Literal["v4", "v5", "v6"],
+        *,
+        worker: int = 0,
+        lines: int = 200,
+    ) -> int:
+        """Print the last `lines` of the most recent training log and exit.
+
+        Non-blocking counterpart to tail_log — used by agents that need a
+        snapshot of stdout/stderr after a run.
+        """
+        proc = gcloud_tpu_ssh(
+            tpu_name=self.tpu_name,
+            project=self.env.tpu_project,
+            zone=self._zone_for(version),
+            worker=str(worker),
+            command=self._tail_log_cmd(lines=lines, follow=False),
+            ssh=self.ssh,
+        )
+        if proc.stdout:
+            print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+        if proc.returncode != 0 and proc.stderr:
+            print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n")
+        return proc.returncode
+
+    def training_status(
+        self,
+        version: Literal["v4", "v5", "v6"],
+        *,
+        worker: int = 0,
+        session: str = "tpu",
+    ) -> tuple[int, str]:
+        """Return (exit_code, status_string) for the training tmux session.
+
+        - 0, "running (<cmd>)"   → tmux pane has a non-shell foreground process
+        - 1, "idle (<shell>)"    → tmux session exists but command exited
+        - 2, "no-session"        → tmux session not found (never launched / killed)
+        - 3, "ssh-error"         → could not reach the worker
+        """
+        s = shlex.quote(session)
+        cmd = (
+            f"if ! tmux has-session -t {s} 2>/dev/null; then echo no-session; exit 2; fi; "
+            f"CMD=$(tmux list-panes -t {s} -F '#{{pane_current_command}}' 2>/dev/null | head -n1); "
+            'case "$CMD" in '
+            '  zsh|bash|sh|fish|dash) echo "idle ($CMD)"; exit 1 ;; '
+            '  "") echo "idle (unknown)"; exit 1 ;; '
+            '  *) echo "running ($CMD)"; exit 0 ;; '
+            "esac"
+        )
+        proc = gcloud_tpu_ssh(
             tpu_name=self.tpu_name,
             project=self.env.tpu_project,
             zone=self._zone_for(version),
@@ -297,7 +463,13 @@ class TPUManager:
             command=cmd,
             ssh=self.ssh,
         )
-        return rc
+        out = (proc.stdout or "").strip().splitlines()
+        msg = out[-1] if out else ""
+        if proc.returncode in (0, 1, 2):
+            return proc.returncode, msg or {0: "running", 1: "idle", 2: "no-session"}[
+                proc.returncode
+            ]
+        return 3, "ssh-error"
 
     def _tmux_kill_all(self, version: Literal["v4", "v5", "v6"]) -> bool:
         remote = (
@@ -425,5 +597,17 @@ class TPUManager:
     def list(self, version: TPUVersion) -> int:
         zone = self._zone_for(version)
         project = self.env.tpu_project
-        rc = run_streaming(["gcloud", "compute", "tpus", "tpu-vm", "list", "--zone", zone, "--project", project])
+        rc = run_streaming(
+            [
+                "gcloud",
+                "compute",
+                "tpus",
+                "tpu-vm",
+                "list",
+                "--zone",
+                zone,
+                "--project",
+                project,
+            ]
+        )
         return rc

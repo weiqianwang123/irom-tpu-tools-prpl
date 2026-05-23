@@ -118,7 +118,15 @@ def _print_commands() -> None:
                 ("tpu ssh my-tpu --worker 1", "Open interactive SSH shell on a specific worker"),
                 ("tpu attach my-tpu", "Attach to tmux session on worker 0"),
                 ("tpu attach my-tpu --worker 1", "Attach to a specific worker"),
-                ("tpu tail my-tpu", "Tail the training log on the TPU"),
+                ("tpu tail my-tpu", "Tail the training log on the TPU (follows live)"),
+                (
+                    "tpu output my-tpu -n 200",
+                    "Print last N lines of training log and exit (non-blocking, for agents)",
+                ),
+                (
+                    "tpu running my-tpu",
+                    "Check if training tmux session is alive (exit 0=running, 1=idle, 2=no-session)",
+                ),
                 ("tpu tmux-ls my-tpu", "List tmux sessions on all workers"),
             ],
         ),
@@ -265,6 +273,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="TPU version to disambiguate when the same name exists in multiple zones",
     )
 
+    p_stop = sub.add_parser(
+        "stop",
+        help="Stop a TPU (preserves allocation; also stops watcher if running)",
+    )
+    _add_name_arg(p_stop)
+    p_stop.add_argument(
+        "--version",
+        "-v",
+        choices=("v4", "v5", "v6"),
+        default=None,
+        help="TPU version to disambiguate when the same name exists in multiple zones",
+    )
+
+    p_start = sub.add_parser("start", help="Start a previously stopped TPU")
+    _add_name_arg(p_start)
+    p_start.add_argument(
+        "--version",
+        "-v",
+        choices=("v4", "v5", "v6"),
+        default=None,
+        help="TPU version to disambiguate when the same name exists in multiple zones",
+    )
+
     p_tmux = sub.add_parser("tmux", help="Run a tmux command on all workers")
     _add_name_arg(p_tmux)
     p_tmux.add_argument("--session", default="tpu")
@@ -286,6 +317,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_name_arg(p_tail)
     p_tail.add_argument("--worker", type=int, default=0)
+
+    # --- output: non-blocking snapshot of latest training log (for agents/scripts) ---
+    p_output = sub.add_parser(
+        "output",
+        help="Print last N lines of the latest training log and exit (non-blocking)",
+    )
+    _add_name_arg(p_output)
+    p_output.add_argument(
+        "--lines", "-n", type=int, default=200, help="Number of lines to print"
+    )
+    p_output.add_argument("--worker", type=int, default=0)
+
+    # --- running: check whether the training tmux session is still active ---
+    p_running = sub.add_parser(
+        "running",
+        help="Check if the training tmux session is still running (exit 0=running, 1=idle, 2=no-session)",
+    )
+    _add_name_arg(p_running)
+    p_running.add_argument("--worker", type=int, default=0)
+    p_running.add_argument("--session", default="tpu")
 
     p_clean_logs = sub.add_parser("clean", help="Truncate system logs on all workers")
     _add_name_arg(p_clean_logs)
@@ -846,6 +897,36 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
+    # stop: stops the watcher (so it does not recreate the TPU) then stops the VM.
+    if ns.cmd == "stop":
+        tpu_name = name or env.tpu_name
+        if not tpu_name:
+            raise SystemExit("Error: no TPU name provided and TPU_NAME is not set")
+        if is_watcher_running(tpu_name):
+            print(f"Stopping watcher for '{tpu_name}'...")
+            stop_watcher(tpu_name)
+        version = getattr(ns, "version", None)
+        if version is not None:
+            mgr = TPUManager(env).for_tpu(tpu_name, version, env.zones[version])
+            print(f"Stopping {tpu_name} in {version} ({env.zones[version]})...")
+        else:
+            mgr = _resolve_mgr(env, name)
+        ok = mgr.stop(mgr.version)
+        return 0 if ok else 1
+
+    if ns.cmd == "start":
+        tpu_name = name or env.tpu_name
+        if not tpu_name:
+            raise SystemExit("Error: no TPU name provided and TPU_NAME is not set")
+        version = getattr(ns, "version", None)
+        if version is not None:
+            mgr = TPUManager(env).for_tpu(tpu_name, version, env.zones[version])
+            print(f"Starting {tpu_name} in {version} ({env.zones[version]})...")
+        else:
+            mgr = _resolve_mgr(env, name)
+        ok = mgr.start(mgr.version)
+        return 0 if ok else 1
+
     mgr = _resolve_mgr(env, name)
     v = mgr.version
     if ns.cmd == "ssh":
@@ -858,6 +939,12 @@ def main(argv: list[str] | None = None) -> int:
         return mgr.attach(v, session=ns.session, worker=ns.worker)
     if ns.cmd == "tail":
         return mgr.tail_log(v, worker=ns.worker)
+    if ns.cmd == "output":
+        return mgr.output_snapshot(v, worker=ns.worker, lines=ns.lines)
+    if ns.cmd == "running":
+        rc, msg = mgr.training_status(v, worker=ns.worker, session=ns.session)
+        print(msg)
+        return rc
     if ns.cmd == "clean":
         ok = mgr.clean_logs(v)
         return 0 if ok else 1
