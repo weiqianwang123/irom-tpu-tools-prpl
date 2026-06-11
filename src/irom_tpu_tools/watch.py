@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import base64
+from dataclasses import dataclass
 import os
 import signal
 import sys
@@ -22,6 +24,16 @@ def _map_v4_topology(tpu_num: int) -> str:
     if tpu_num not in mapping:
         raise SystemExit(f"Error: unsupported TPU_NUM '{tpu_num}' (allowed: 4, 8, 16, 32)")
     return mapping[tpu_num]
+
+
+@dataclass(frozen=True)
+class WatchConfig:
+    version: str
+    force_run: bool
+    tpu_num: int
+    branch: str
+    extra_args: list[str]
+    setup_cmd: str = "uv sync"
 
 
 def _split_repo(repo: str) -> tuple[str, str]:
@@ -332,3 +344,144 @@ def spawn_watcher(job: JobConfig, env: TPUEnvConfig, *, force_run: bool = False)
         print(f"{_ts()} - Watcher crashed: {exc}")
     finally:
         os._exit(0)
+
+
+def watch_and_run(cfg: WatchConfig, env: TPUEnvConfig) -> None:
+    """Foreground watch loop used by `tpu watch`.
+
+    This intentionally does not daemonize: it keeps trying to create the TPU
+    until capacity becomes available, then runs setup and launches the command.
+    """
+    if not env.gh_owner or not env.gh_repo_name:
+        raise SystemExit("GH_OWNER and GH_REPO_NAME must be set for `tpu watch`.")
+
+    repo = f"{env.gh_owner}/{env.gh_repo_name}"
+    mgr = TPUManager(env)
+    zone = env.zones[cfg.version]
+
+    print("Starting TPU foreground watch with:")
+    print(f"  TPU Name: {env.tpu_name}")
+    print(f"  Version: {cfg.version}")
+    print(f"  Zone: {zone}")
+    print(f"  Project: {env.tpu_project}")
+    print(f"  Service Account: {env.service_account_for_zone(zone)}")
+    print(f"  Repo: {repo}")
+    print(f"  Branch: {cfg.branch}")
+    print(f"  Setup cmd: {cfg.setup_cmd}")
+    print(f"  TPU Num: {cfg.tpu_num}")
+    print(f"  Force run: {cfg.force_run}")
+    if cfg.extra_args:
+        print(f"  Command: {' '.join(cfg.extra_args)}")
+    print()
+
+    def handle_sig(signum, frame):
+        print(f"{_ts()} - Caught signal {signum}, exiting.")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, handle_sig)
+    signal.signal(signal.SIGTERM, handle_sig)
+
+    training_launched = False
+    while True:
+        print(f"{_ts()} - Checking TPU state...")
+        try:
+            state = mgr.describe(cfg.version)
+        except Exception as exc:
+            print(f"{_ts()} - Describe error: {exc}")
+            sys.stdout.flush()
+            sleep(mgr.sleep_secs)
+            continue
+
+        print(f"{_ts()} - TPU {env.tpu_name} state: {state}")
+        sys.stdout.flush()
+
+        run_setup_and_training = False
+        if state in {"NOT_FOUND", "PREEMPTED", "STOPPED"}:
+            print(f"{_ts()} - Need to (re)create TPU...")
+            if state != "NOT_FOUND" and not mgr.delete(cfg.version):
+                print(f"{_ts()} - Delete failed/timed out.")
+                sys.stdout.flush()
+                sleep(mgr.sleep_secs)
+                continue
+
+            print(f"{_ts()} - Creating new TPU...")
+            topo = _map_v4_topology(cfg.tpu_num) if cfg.version == "v4" else None
+            if not mgr.create(cfg.version, tpu_num=cfg.tpu_num, topology=topo):
+                print(f"{_ts()} - Create failed/timed out; will retry.")
+                sys.stdout.flush()
+                sleep(mgr.sleep_secs)
+                continue
+
+            print(f"{_ts()} - Waiting for TPU to be READY...")
+            if not _wait_for_ready(mgr, cfg.version):
+                sys.stdout.flush()
+                sleep(mgr.sleep_secs)
+                continue
+            run_setup_and_training = True
+        elif state == "READY":
+            run_setup_and_training = cfg.force_run and not training_launched
+            if not run_setup_and_training:
+                print(f"{_ts()} - TPU READY; training already launched or force not requested.")
+        elif state == "PERMISSION_DENIED":
+            print(f"{_ts()} - PERMISSION_DENIED from describe. Check IAM/API enablement.")
+        else:
+            print(f"{_ts()} - TPU in state: {state} (not actionable now).")
+
+        if run_setup_and_training:
+            ok = _do_setup_and_training(
+                mgr,
+                cfg.version,
+                env,
+                command=" ".join(cfg.extra_args),
+                branch=cfg.branch,
+                setup_cmd=cfg.setup_cmd,
+                repo=repo,
+            )
+            if ok:
+                training_launched = True
+                print(f"{_ts()} - Training launch complete.")
+                if cfg.force_run:
+                    print(f"{_ts()} - Force run requested; exiting.")
+                    return
+            else:
+                print(f"{_ts()} - Setup/launch failed; will retry.")
+
+        sys.stdout.flush()
+        sleep(mgr.sleep_secs)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="tpu watch")
+    parser.add_argument("version", choices=["v4", "v5", "v6"], help="TPU version to target")
+    parser.add_argument("--force", "-f", action="store_true", help="Force setup/training if READY")
+    parser.add_argument("--tpu-num", "-n", type=int, default=8, help="TPU chips")
+    parser.add_argument("--setup-cmd", "-s", default="uv sync", help="Setup command to run after clone")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_arg_parser()
+    ns, extra = parser.parse_known_args(argv)
+    if extra and extra[0] == "--":
+        extra = extra[1:]
+
+    branch = "main"
+    if extra and not extra[0].startswith("-"):
+        branch = extra[0]
+        extra = extra[1:]
+
+    if not extra:
+        raise SystemExit("No run command provided. Usage: tpu watch <version> [flags] <branch> <run_command...>")
+
+    env = TPUEnvConfig.from_env()
+    cfg = WatchConfig(
+        version=ns.version,
+        force_run=ns.force,
+        tpu_num=ns.tpu_num,
+        branch=branch,
+        extra_args=extra,
+        setup_cmd=ns.setup_cmd,
+    )
+    watch_and_run(cfg, env)
+    return 0

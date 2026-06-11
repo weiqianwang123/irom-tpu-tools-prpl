@@ -216,6 +216,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="If TPU is already READY, re-run setup and command without prompting",
     )
 
+    # --- watch: foreground launcher that keeps retrying create until capacity is available ---
+    p_watch = sub.add_parser(
+        "watch",
+        help="Watch TPU state and create/setup/launch training when capacity is available",
+    )
+    p_watch.add_argument("version", choices=["v4", "v5", "v6"], help="TPU version")
+    p_watch.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Force setup and training if the TPU is already READY, then exit after launch",
+    )
+    p_watch.add_argument("--tpu-num", "-n", type=int, default=8, help="TPU chips")
+    p_watch.add_argument(
+        "--setup-cmd",
+        "-s",
+        default="uv sync",
+        help='Setup command run inside the cloned repo (e.g. "uv sync && uv pip install -e .")',
+    )
+
     # --- list (optional version filter, shows watcher status) ---
     p_list = sub.add_parser("list", help="List TPUs with watcher status")
     p_list.add_argument(
