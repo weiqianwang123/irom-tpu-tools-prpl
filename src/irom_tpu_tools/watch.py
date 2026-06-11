@@ -22,6 +22,36 @@ def _ts() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _health_is_unusable(health: str) -> bool:
+    return health.upper().startswith("UNHEALTHY")
+
+
+def _state_with_health_check(mgr: TPUManager, version: str, state: str) -> str:
+    if state != "READY":
+        return state
+    status_state, health = mgr.describe_status(version)  # type: ignore[arg-type]
+    if status_state == "READY" and _health_is_unusable(health):
+        print(f"{_ts()} - TPU is READY but health={health}; treating as PREEMPTED.")
+        return "PREEMPTED"
+    return state
+
+
+def _build_status_abort_monitor(mgr: TPUManager, version: str, phase: str):
+    last_reported: dict[str, str] = {}
+
+    def _should_abort() -> bool:
+        state, health = mgr.describe_status(version)  # type: ignore[arg-type]
+        if state != "READY" or _health_is_unusable(health):
+            status = f"state={state}, health={health or '-'}"
+            if last_reported.get("status") != status:
+                print(f"{_ts()} - TPU status changed during {phase}: {status}; aborting {phase}.")
+                last_reported["status"] = status
+            return True
+        return False
+
+    return _should_abort
+
+
 def _map_v4_topology(tpu_num: int) -> str:
     mapping = {4: "2x2x1", 8: "2x2x2", 16: "2x2x4", 32: "2x4x4"}
     if tpu_num not in mapping:
@@ -199,9 +229,9 @@ echo 'export GH_REPO="${GH_REPO}"' >> ~/.zshrc
 source ~/.zshrc
 if [ ! -d "${GH_REPO}/.git" ]; then
     git clone --recurse-submodules "https://${GH_TOKEN}@github.com/${GH_OWNER}/${GH_REPO}.git"
-    cd ${GH_REPO}
-    ${SETUP_CMD}
 fi
+cd ${GH_REPO}
+${SETUP_CMD}
 """ if repo else ""
 
     tpl = Template(baseline + repo_block)
@@ -252,9 +282,26 @@ def _do_setup_and_training(
     repo: str,
 ) -> bool:
     """Run setup + optionally launch training. Returns True on success."""
+    state, health = mgr.describe_status(version)  # type: ignore[arg-type]
+    if state != "READY" or _health_is_unusable(health):
+        print(f"{_ts()} - Skipping setup because TPU is not usable: state={state}, health={health or '-'}.")
+        return False
+
+    health_check_secs = int(os.environ.get("TPU_WATCH_HEALTH_CHECK_SECS", "20"))
+    setup_timeout_secs = int(os.environ.get("TPU_WATCH_SETUP_TIMEOUT_SECS", "1800"))
+    launch_timeout_secs = int(os.environ.get("TPU_WATCH_LAUNCH_TIMEOUT_SECS", "300"))
+    abort_setup = _build_status_abort_monitor(mgr, version, "setup")
+
     print(f"{_ts()} - Running setup on workers...")
     remote_cmd = build_setup_cmd(version, env, setup_cmd, repo)
-    rc = mgr.raw(version, cmd=remote_cmd, worker="all")
+    rc = mgr.raw(
+        version,
+        cmd=remote_cmd,
+        worker="all",
+        total_timeout_s=setup_timeout_secs,
+        monitor_interval_s=health_check_secs,
+        should_terminate=abort_setup,
+    )
     if rc != 0:
         print(f"{_ts()} - Setup failed (rc={rc}).")
         return False
@@ -264,6 +311,7 @@ def _do_setup_and_training(
         return True
 
     print(f"{_ts()} - Starting training...")
+    abort_launch = _build_status_abort_monitor(mgr, version, "launch")
     _, gh_repo = _split_repo(repo)
     if gh_repo:
         train_cmd = (
@@ -274,7 +322,14 @@ def _do_setup_and_training(
     else:
         # Bare TPU: run the command from $HOME with no repo fetch/checkout.
         train_cmd = f"source ~/.zshrc && {command}"
-    if not mgr.tmux(version, cmd=train_cmd, session="tpu"):
+    if not mgr.tmux(
+        version,
+        cmd=train_cmd,
+        session="tpu",
+        total_timeout_s=launch_timeout_secs,
+        monitor_interval_s=health_check_secs,
+        should_terminate=abort_launch,
+    ):
         print(f"{_ts()} - Launch failed/SSH timed out.")
         return False
 
@@ -299,6 +354,9 @@ def _wait_for_ready(mgr: TPUManager, version: str, *, poll_secs: int = 15) -> bo
         print(f"{_ts()} - TPU state: {state}")
         sys.stdout.flush()
         if state == "READY":
+            state = _state_with_health_check(mgr, version, state)
+            if state != "READY":
+                return False
             return True
         if state in {"PREEMPTED", "STOPPED", "NOT_FOUND", "ERROR", "PERMISSION_DENIED"}:
             print(f"{_ts()} - Unexpected state '{state}' while waiting for READY.")
@@ -355,6 +413,7 @@ def watch_loop(job: JobConfig, env: TPUEnvConfig, *, force_run: bool = False) ->
             continue
 
         print(f"{_ts()} - TPU '{job.name}' state: {state}")
+        state = _state_with_health_check(mgr, job.version, state)
         sys.stdout.flush()
 
         if state == "READY":
@@ -525,6 +584,7 @@ def watch_and_run(cfg: WatchConfig, env: TPUEnvConfig) -> None:
             continue
 
         print(f"{_ts()} - TPU {env.tpu_name} state: {state}")
+        state = _state_with_health_check(mgr, cfg.version, state)
         sys.stdout.flush()
 
         run_setup_and_training = False

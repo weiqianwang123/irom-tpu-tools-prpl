@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+import json
 import os
 import re
 import shlex
@@ -146,6 +148,37 @@ class TPUManager:
             return "ERROR"
         return state
 
+    def describe_status(self, version: TPUVersion) -> tuple[str, str]:
+        """Return TPU (state, health) from a single describe call."""
+        proc = run_with_timeout(
+            self.describe_timeout_s,
+            int(os.environ.get("SSH_KILL_AFTER", 5)),
+            [
+                "gcloud",
+                "alpha",
+                "compute",
+                "tpus",
+                "tpu-vm",
+                "describe",
+                self.tpu_name,
+                "--zone",
+                self._zone_for(version),
+                "--project",
+                self.env.tpu_project,
+                "--format",
+                "json",
+            ],
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            data = json.loads(proc.stdout)
+            return str(data.get("state") or "UNKNOWN"), str(data.get("health") or "")
+        out = (proc.stderr or proc.stdout or "").lower()
+        if re.search(r"not\s*found|404", out):
+            return "NOT_FOUND", ""
+        if re.search(r"permission_denied|forbidden|403", out):
+            return "PERMISSION_DENIED", ""
+        return "ERROR", ""
+
     def delete(self, version: Literal["v4", "v5", "v6"]) -> bool:
         zone = self._zone_for(version)
         rc = run_streaming(
@@ -272,7 +305,14 @@ class TPUManager:
         return rc == 0
 
     def tmux(
-        self, version: Literal["v4", "v5", "v6"], *, cmd: str, session: str = "tpu"
+        self,
+        version: Literal["v4", "v5", "v6"],
+        *,
+        cmd: str,
+        session: str = "tpu",
+        total_timeout_s: int | None = None,
+        monitor_interval_s: int = 10,
+        should_terminate: Callable[[], bool] | None = None,
     ) -> bool:
         # Ensure tmux exists and start/send in a session across all workers
         line = f"set -eo pipefail; export PYTHONUNBUFFERED=1; {cmd} 2>&1 | tee -a $LOG"
@@ -297,6 +337,9 @@ class TPUManager:
                 worker="all",
                 command=remote,
                 ssh=self.ssh,
+                total_timeout_s=total_timeout_s,
+                monitor_interval_s=monitor_interval_s,
+                should_terminate=should_terminate,
             )
             == 0
         )
@@ -307,6 +350,9 @@ class TPUManager:
         *,
         cmd: str,
         worker: str | None = "all",
+        total_timeout_s: int | None = None,
+        monitor_interval_s: int = 10,
+        should_terminate: Callable[[], bool] | None = None,
     ) -> int:
         """Run a raw command on TPU worker(s) without tmux.
 
@@ -319,6 +365,9 @@ class TPUManager:
             worker=worker if worker is not None else None,
             command=cmd,
             ssh=self.ssh,
+            total_timeout_s=total_timeout_s,
+            monitor_interval_s=monitor_interval_s,
+            should_terminate=should_terminate,
         )
 
     def shell(self, version: Literal["v4", "v5", "v6"], *, worker: int = 0) -> int:
