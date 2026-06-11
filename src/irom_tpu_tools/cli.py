@@ -850,6 +850,8 @@ def main(argv: list[str] | None = None) -> int:
                 *((ns.force and ["--force"]) or []),
                 "-n",
                 str(ns.tpu_num),
+                "--setup-cmd",
+                ns.setup_cmd,
                 *unknown,
             ]
         )
