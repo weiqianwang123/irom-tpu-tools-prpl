@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 from dataclasses import dataclass
+import json
 import os
 import signal
 import sys
@@ -12,6 +13,8 @@ from time import sleep
 
 from .config import TPUEnvConfig
 from .jobs import JobConfig
+from .ssh import run_streaming
+from .ssh import run_with_timeout
 from .tpu import TPUManager
 
 
@@ -34,6 +37,122 @@ class WatchConfig:
     branch: str
     extra_args: list[str]
     setup_cmd: str = "uv sync"
+
+
+def _queued_resource_name(tpu_name: str) -> str:
+    return f"{tpu_name}-qr"
+
+
+def _accelerator_and_runtime(version: str, tpu_num: int) -> tuple[str, str]:
+    if version == "v6":
+        return f"v6e-{tpu_num}", "v2-alpha-tpuv6e"
+    if version == "v5":
+        accel = {
+            8: "v5litepod-8",
+            16: "v5litepod-16",
+            32: "v5litepod-32",
+            64: "v5litepod-64",
+        }.get(tpu_num)
+        if not accel:
+            raise ValueError("Unsupported TPU_NUM for v5: expected 8/16/32/64")
+        return accel, "v2-alpha-tpuv5-lite"
+    if version == "v4":
+        return f"v4-{tpu_num}", "tpu-ubuntu2204-base"
+    raise ValueError(f"Unsupported TPU version: {version}")
+
+
+def _queued_resource_summary(data: dict) -> str:
+    state = data.get("state")
+    if isinstance(state, dict):
+        state_name = state.get("state") or state.get("stateName") or state.get("name")
+        state_initiator = state.get("stateInitiator")
+        return ", ".join(str(x) for x in (state_name, state_initiator) if x) or json.dumps(state, sort_keys=True)
+    if state:
+        return str(state)
+    return data.get("name", "UNKNOWN")
+
+
+def _describe_queued_resource(env: TPUEnvConfig, version: str, name: str) -> tuple[str, dict | None]:
+    zone = env.zones[version]
+    proc = run_with_timeout(
+        30,
+        int(os.environ.get("SSH_KILL_AFTER", 5)),
+        [
+            "gcloud",
+            "alpha",
+            "compute",
+            "tpus",
+            "queued-resources",
+            "describe",
+            name,
+            "--zone",
+            zone,
+            "--project",
+            env.tpu_project,
+            "--format",
+            "json",
+        ],
+    )
+    if proc.returncode == 0 and proc.stdout.strip():
+        data = json.loads(proc.stdout)
+        return _queued_resource_summary(data), data
+    out = (proc.stderr or proc.stdout or "").lower()
+    if "not found" in out or "404" in out:
+        return "NOT_FOUND", None
+    return (proc.stderr or proc.stdout or "ERROR").strip().splitlines()[-1], None
+
+
+def _delete_queued_resource(env: TPUEnvConfig, version: str, name: str) -> bool:
+    return (
+        run_streaming(
+            [
+                "gcloud",
+                "alpha",
+                "compute",
+                "tpus",
+                "queued-resources",
+                "delete",
+                name,
+                "--zone",
+                env.zones[version],
+                "--project",
+                env.tpu_project,
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+
+
+def _create_queued_resource(env: TPUEnvConfig, version: str, tpu_num: int, *, name: str) -> bool:
+    accel, runtime = _accelerator_and_runtime(version, tpu_num)
+    zone = env.zones[version]
+    sa = env.service_account_for_zone(zone)
+    qr_name = _queued_resource_name(name)
+    args = [
+        "gcloud",
+        "alpha",
+        "compute",
+        "tpus",
+        "queued-resources",
+        "create",
+        qr_name,
+        "--zone",
+        zone,
+        "--project",
+        env.tpu_project,
+        "--accelerator-type",
+        accel,
+        "--runtime-version",
+        runtime,
+        "--node-id",
+        name,
+        "--service-account",
+        sa,
+        "--spot",
+        "--async",
+    ]
+    return run_streaming(args) == 0
 
 
 def _split_repo(repo: str) -> tuple[str, str]:
@@ -382,8 +501,17 @@ def watch_and_run(cfg: WatchConfig, env: TPUEnvConfig) -> None:
     signal.signal(signal.SIGTERM, handle_sig)
 
     training_launched = False
+    waiting_for_queued_resource = False
+    queued_supported = cfg.version in {"v5", "v6"} and os.environ.get("TPU_WATCH_USE_QUEUED", "1") != "0"
+    qr_name = _queued_resource_name(env.tpu_name)
     while True:
         print(f"{_ts()} - Checking TPU state...")
+        if queued_supported:
+            qr_state, _ = _describe_queued_resource(env, cfg.version, qr_name)
+            if qr_state != "NOT_FOUND":
+                waiting_for_queued_resource = True
+                print(f"{_ts()} - Queued resource {qr_name} state: {qr_state}")
+
         try:
             state = mgr.describe(cfg.version)
         except Exception as exc:
@@ -397,6 +525,36 @@ def watch_and_run(cfg: WatchConfig, env: TPUEnvConfig) -> None:
 
         run_setup_and_training = False
         if state in {"NOT_FOUND", "PREEMPTED", "STOPPED"}:
+            if queued_supported:
+                if state != "NOT_FOUND":
+                    print(f"{_ts()} - TPU state is {state}; deleting node before queueing replacement.")
+                    if not mgr.delete(cfg.version):
+                        print(f"{_ts()} - Delete failed/timed out.")
+                        sys.stdout.flush()
+                        sleep(mgr.sleep_secs)
+                        continue
+
+                qr_state, _ = _describe_queued_resource(env, cfg.version, qr_name)
+                if qr_state == "NOT_FOUND":
+                    print(f"{_ts()} - Creating queued resource {qr_name} for node {env.tpu_name}...")
+                    if not _create_queued_resource(env, cfg.version, cfg.tpu_num, name=env.tpu_name):
+                        print(f"{_ts()} - Queued resource create failed; will retry.")
+                    else:
+                        waiting_for_queued_resource = True
+                        print(f"{_ts()} - Queued resource submitted; waiting for capacity.")
+                elif "FAILED" in qr_state.upper():
+                    print(f"{_ts()} - Queued resource {qr_name} is failed ({qr_state}); recreating it.")
+                    if _delete_queued_resource(env, cfg.version, qr_name):
+                        waiting_for_queued_resource = False
+                    else:
+                        print(f"{_ts()} - Failed to delete queued resource {qr_name}; will retry.")
+                else:
+                    waiting_for_queued_resource = True
+                    print(f"{_ts()} - Waiting for queued resource {qr_name}; current state: {qr_state}.")
+                sys.stdout.flush()
+                sleep(mgr.sleep_secs)
+                continue
+
             print(f"{_ts()} - Need to (re)create TPU...")
             if state != "NOT_FOUND" and not mgr.delete(cfg.version):
                 print(f"{_ts()} - Delete failed/timed out.")
@@ -419,7 +577,7 @@ def watch_and_run(cfg: WatchConfig, env: TPUEnvConfig) -> None:
                 continue
             run_setup_and_training = True
         elif state == "READY":
-            run_setup_and_training = cfg.force_run and not training_launched
+            run_setup_and_training = (cfg.force_run or waiting_for_queued_resource) and not training_launched
             if not run_setup_and_training:
                 print(f"{_ts()} - TPU READY; training already launched or force not requested.")
         elif state == "PERMISSION_DENIED":
@@ -439,6 +597,7 @@ def watch_and_run(cfg: WatchConfig, env: TPUEnvConfig) -> None:
             )
             if ok:
                 training_launched = True
+                waiting_for_queued_resource = False
                 print(f"{_ts()} - Training launch complete.")
                 if cfg.force_run:
                     print(f"{_ts()} - Force run requested; exiting.")
