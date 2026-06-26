@@ -3,10 +3,27 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import sys
 
 from ..ssh import SSHOptions, gcloud_tpu_ssh_stream, run_streaming
 from .config import QueueConfig
 from .types import InteractiveTPUConfig
+
+
+def _permission_hint(tpu: InteractiveTPUConfig) -> str:
+    return (
+        "\n[hint] Interactive TPU access is connect-only, but gcloud still needs "
+        "read permission on the existing TPU node. Ask an admin to grant "
+        f"`roles/tpu.viewer` on project `{tpu.project}` or a custom role with "
+        f"`tpu.nodes.get` for zone `{tpu.zone}`, plus the required OS Login/IAP "
+        "SSH permissions. No TPU Admin role is required."
+    )
+
+
+def _with_access_hint(rc: int, tpu: InteractiveTPUConfig) -> int:
+    if rc != 0:
+        print(_permission_hint(tpu), file=sys.stderr)
+    return rc
 
 
 def resolve_interactive_tpu(
@@ -50,7 +67,10 @@ def describe_interactive_tpu(tpu: InteractiveTPUConfig) -> dict:
         check=False,
     )
     if proc.returncode != 0 or not proc.stdout.strip():
-        return {"state": "UNKNOWN", "health": "-", "error": (proc.stderr or "").strip()}
+        error = (proc.stderr or "").strip()
+        if "tpu.nodes.get" in error or "PERMISSION_DENIED" in error:
+            error = f"{error}{_permission_hint(tpu)}"
+        return {"state": "UNKNOWN", "health": "-", "error": error}
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError:
@@ -84,46 +104,55 @@ def list_rows(config: QueueConfig, *, live: bool = False) -> list[list[str]]:
 
 
 def ssh_shell(tpu: InteractiveTPUConfig, *, worker: int = 0) -> int:
-    return gcloud_tpu_ssh_stream(
-        tpu_name=tpu.name,
-        project=tpu.project,
-        zone=tpu.zone,
-        worker=str(worker),
-        ssh=SSHOptions(),
-        allocate_tty=True,
+    return _with_access_hint(
+        gcloud_tpu_ssh_stream(
+            tpu_name=tpu.name,
+            project=tpu.project,
+            zone=tpu.zone,
+            worker=str(worker),
+            ssh=SSHOptions(),
+            allocate_tty=True,
+        ),
+        tpu,
     )
 
 
 def run_command(
     tpu: InteractiveTPUConfig, *, command: str, worker: int | str = 0
 ) -> int:
-    return gcloud_tpu_ssh_stream(
-        tpu_name=tpu.name,
-        project=tpu.project,
-        zone=tpu.zone,
-        worker=str(worker),
-        command=command,
-        ssh=SSHOptions(),
-        allocate_tty=False,
+    return _with_access_hint(
+        gcloud_tpu_ssh_stream(
+            tpu_name=tpu.name,
+            project=tpu.project,
+            zone=tpu.zone,
+            worker=str(worker),
+            command=command,
+            ssh=SSHOptions(),
+            allocate_tty=False,
+        ),
+        tpu,
     )
 
 
 def attach_tmux(
     tpu: InteractiveTPUConfig, *, session: str = "tpu", worker: int = 0
 ) -> int:
-    return gcloud_tpu_ssh_stream(
-        tpu_name=tpu.name,
-        project=tpu.project,
-        zone=tpu.zone,
-        worker=str(worker),
-        command=(
-            "command -v tmux >/dev/null || "
-            "(sudo apt-get update && sudo apt-get install -y tmux); "
-            f"exec tmux new -As {shlex.quote(session)}"
+    return _with_access_hint(
+        gcloud_tpu_ssh_stream(
+            tpu_name=tpu.name,
+            project=tpu.project,
+            zone=tpu.zone,
+            worker=str(worker),
+            command=(
+                "command -v tmux >/dev/null || "
+                "(sudo apt-get update && sudo apt-get install -y tmux); "
+                f"exec tmux new -As {shlex.quote(session)}"
+            ),
+            ssh=SSHOptions(),
+            allocate_tty=True,
+            no_shell_rc=True,
         ),
-        ssh=SSHOptions(),
-        allocate_tty=True,
-        no_shell_rc=True,
+        tpu,
     )
 
 
@@ -150,13 +179,16 @@ def tmux_command(
         f"tmux send-keys -t {session_q} {shlex.quote(line)} Enter;"
         "echo LOG=$LOG"
     )
-    return gcloud_tpu_ssh_stream(
-        tpu_name=tpu.name,
-        project=tpu.project,
-        zone=tpu.zone,
-        worker=str(worker),
-        command=remote,
-        ssh=SSHOptions(),
+    return _with_access_hint(
+        gcloud_tpu_ssh_stream(
+            tpu_name=tpu.name,
+            project=tpu.project,
+            zone=tpu.zone,
+            worker=str(worker),
+            command=remote,
+            ssh=SSHOptions(),
+        ),
+        tpu,
     )
 
 
@@ -181,13 +213,16 @@ def tail_output(
         "fi; "
         'echo "[ERROR] No interactive log files found"; exit 1'
     )
-    return gcloud_tpu_ssh_stream(
-        tpu_name=tpu.name,
-        project=tpu.project,
-        zone=tpu.zone,
-        worker=str(worker),
-        command=remote,
-        ssh=SSHOptions(),
+    return _with_access_hint(
+        gcloud_tpu_ssh_stream(
+            tpu_name=tpu.name,
+            project=tpu.project,
+            zone=tpu.zone,
+            worker=str(worker),
+            command=remote,
+            ssh=SSHOptions(),
+        ),
+        tpu,
     )
 
 
@@ -225,7 +260,7 @@ def scp_to(
             str(worker),
         ]
     )
-    return run_streaming(args)
+    return _with_access_hint(run_streaming(args), tpu)
 
 
 def scp_from(
@@ -258,4 +293,4 @@ def scp_from(
             str(worker),
         ]
     )
-    return run_streaming(args)
+    return _with_access_hint(run_streaming(args), tpu)

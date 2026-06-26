@@ -124,10 +124,14 @@ default includes `v4-16-01-interactive` plus `v4-4-01-interactive` through
 `v4-16-interactive`, `v4-32-interactive`, and `v4-4-interactive-01` through
 `v4-4-interactive-04`.
 
-Interactive users need only the project/IAP/OS Login permissions required to SSH
-to the existing TPU VM and perform normal file I/O on it. They do not need TPU
-Admin because `tpu interactive` never creates, deletes, stops, or starts TPU
-resources.
+Interactive users need read permission on existing TPU nodes plus the
+project/IAP/OS Login permissions required to SSH to the TPU VM and perform
+normal file I/O on it. The simplest TPU permission is `roles/tpu.viewer`, which
+includes `tpu.nodes.get` and `tpu.nodes.list`. A narrower custom role can use
+`tpu.nodes.get` for `ssh`, `run`, `tmux`, `put`, and `get`; add
+`tpu.nodes.list` if the user should run live inventory commands. They do not
+need TPU Admin because `tpu interactive` never creates, deletes, stops, or
+starts TPU resources.
 
 ## Scheduler
 
@@ -182,9 +186,22 @@ Normal users need:
 
 - `storage.objects.create/get/list` on queue prefixes.
 - Read access to their logs/status.
-- SSH/IAP/OS Login access to allowlisted shared interactive TPUs, if they use
-  `tpu interactive`.
+- For allowlisted shared interactive TPUs: `tpu.nodes.get` on the existing TPU
+  nodes, usually via `roles/tpu.viewer`; `tpu.nodes.list` is needed for live
+  inventory/listing. They also need SSH/IAP/OS Login access.
 - No TPU Admin role.
+
+Common built-in role grant for an interactive user:
+
+```bash
+gcloud projects add-iam-policy-binding mae-irom-lab-guided-data \
+  --member=user:ah4775@princeton.edu \
+  --role=roles/tpu.viewer
+```
+
+For tighter access, create/bind a custom read-only TPU role with
+`tpu.nodes.get` and optionally `tpu.nodes.list`, then restrict the binding with
+an IAM condition for `us-central2-b` TPU node resource names if desired.
 
 Scheduler/admin identity needs:
 

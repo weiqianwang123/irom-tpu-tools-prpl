@@ -11,7 +11,7 @@ import unittest
 from irom_tpu_tools.queue.backend import DryRunBackend
 from irom_tpu_tools.queue.cli import build_parser
 from irom_tpu_tools.queue.config import QueueConfig, load_config
-from irom_tpu_tools.queue.interactive import resolve_interactive_tpu
+from irom_tpu_tools.queue.interactive import _permission_hint, resolve_interactive_tpu
 from irom_tpu_tools.queue.scheduler import Scheduler
 from irom_tpu_tools.queue.startup_script import build_startup_script
 from irom_tpu_tools.queue.types import (
@@ -201,6 +201,15 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(tpu.name, "v4-4-01-interactive")
         with self.assertRaises(SystemExit):
             resolve_interactive_tpu(config, "not-allowlisted")
+
+    def test_interactive_permission_hint_mentions_read_only_tpu_access(self) -> None:
+        config = make_config(Path("/tmp"))
+        tpu = resolve_interactive_tpu(config, "v4-interactive")
+        hint = _permission_hint(tpu)
+        self.assertIn("roles/tpu.viewer", hint)
+        self.assertIn("tpu.nodes.get", hint)
+        self.assertIn("us-central2-b", hint)
+        self.assertIn("No TPU Admin role is required", hint)
 
     def test_default_config_has_v4_interactive_entry(self) -> None:
         config = load_config()
