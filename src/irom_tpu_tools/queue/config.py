@@ -96,10 +96,16 @@ def parse_config(raw: dict[str, Any]) -> QueueConfig:
         qr_label_workaround=bool(sched_raw.get("qr_label_workaround", False)),
     )
 
+    def parse_chip_limit(value: Any) -> int | None:
+        return None if value is None else int(value)
+
     limits_raw = raw.get("user_limits", {})
     user_limits = UserLimitConfig(
-        default_max_chips=limits_raw.get("default_max_chips"),
-        users={str(k): int(v) for k, v in limits_raw.get("users", {}).items()},
+        default_max_chips=parse_chip_limit(limits_raw.get("default_max_chips")),
+        users={
+            str(k): parse_chip_limit(v)
+            for k, v in limits_raw.get("users", {}).items()
+        },
     )
 
     interactive_tpus: dict[str, InteractiveTPUConfig] = {}

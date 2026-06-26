@@ -56,7 +56,7 @@ class QuotaGroupConfig:
 @dataclass(frozen=True)
 class UserLimitConfig:
     default_max_chips: int | None = None
-    users: dict[str, int] = field(default_factory=dict)
+    users: dict[str, int | None] = field(default_factory=dict)
 
     def max_chips_for(self, user: str) -> int | None:
         return self.users.get(user, self.default_max_chips)

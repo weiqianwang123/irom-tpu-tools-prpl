@@ -28,7 +28,9 @@ from irom_tpu_tools.queue.types import (
 )
 
 
-def make_config(tmp: Path, *, user_limit: int | None = None) -> QueueConfig:
+def make_config(
+    tmp: Path, *, user_limit: int | None = None, quota_total: int = 8
+) -> QueueConfig:
     return QueueConfig(
         resources={
             "v6-8": ResourceConfig(
@@ -46,7 +48,7 @@ def make_config(tmp: Path, *, user_limit: int | None = None) -> QueueConfig:
                 service_account="worker@test-project.iam.gserviceaccount.com",
             )
         },
-        quota_groups={"v6": QuotaGroupConfig(name="v6", total_chips=8)},
+        quota_groups={"v6": QuotaGroupConfig(name="v6", total_chips=quota_total)},
         scheduler=SchedulerConfig(
             scan_interval=1,
             active_no_claim_timeout=60,
@@ -179,6 +181,22 @@ class SchedulerTests(unittest.TestCase):
                 backend.read_gcs(f"{config.primary_bucket}/jobs/job-b/status.json") or "{}"
             )
             self.assertEqual(status_b["status"], JobStatus.PENDING.value)
+
+    def test_user_limit_null_override_is_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d), user_limit=8, quota_total=16)
+            config.user_limits.users["admin"] = None
+            write_job(backend, config.primary_bucket, make_spec("job-a", user="admin"))
+            write_job(backend, config.primary_bucket, make_spec("job-b", user="admin"))
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once()
+            self.assertEqual(len(backend.queued_resources), 2)
+
+    def test_default_config_has_admin_unlimited(self) -> None:
+        config = load_config()
+        self.assertIsNone(config.user_limits.max_chips_for("admin"))
 
     def test_startup_script_has_centralized_sentinels_and_no_local_watcher(self) -> None:
         script = build_startup_script(

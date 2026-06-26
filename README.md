@@ -157,6 +157,10 @@ The scheduler loop:
 6. Deletes terminal or orphaned queue-owned resources.
 7. Writes `scheduler_state.json` for fast CLI listing.
 
+The packaged config sets `admin: null` under `user_limits.users`, which means
+jobs submitted as user `admin` are not capped by the per-user chip limit. Global
+quota-group limits still apply.
+
 ## Admin Commands
 
 These commands are intended for the central admin account:
