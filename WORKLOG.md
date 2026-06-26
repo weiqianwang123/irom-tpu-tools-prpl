@@ -30,3 +30,5 @@ Validation:
   `/tmp/irom-tpu-queue-smoke`.
 
 No real TPU or GCP queued resource was launched.
+
+Implementation commit: `1b646295e94352a98526a5151d8ef0b25cd7775f`.
