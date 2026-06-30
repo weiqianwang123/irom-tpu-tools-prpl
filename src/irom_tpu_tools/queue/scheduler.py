@@ -107,8 +107,10 @@ class Scheduler:
     def _cancel_requested(self, job: Job) -> bool:
         return self.backend.exists_gcs(f"{job.job_dir}/canceled")
 
-    def check_canceled_jobs(self) -> None:
+    def check_canceled_jobs(self, job_ids: set[str] | None = None) -> None:
         for job_id, job in list(self.jobs.items()):
+            if job_ids is not None and job_id not in job_ids:
+                continue
             if job.state.status in TERMINAL_STATUSES:
                 continue
             if self._cancel_requested(job):
@@ -126,8 +128,10 @@ class Scheduler:
         logger.info("Job %s canceled: %s", job_id, reason)
         self._write_status(job_id)
 
-    def check_completed_jobs(self) -> None:
+    def check_completed_jobs(self, job_ids: set[str] | None = None) -> None:
         for job_id, job in list(self.jobs.items()):
+            if job_ids is not None and job_id not in job_ids:
+                continue
             if job.state.status != JobStatus.RUNNING:
                 continue
             if self.backend.exists_gcs(f"{job.job_dir}/succeeded"):
@@ -157,8 +161,10 @@ class Scheduler:
         if current_qr and resource:
             self._cleanup_job_resources(current_qr, resource)
 
-    def check_retry_requests(self) -> None:
+    def check_retry_requests(self, job_ids: set[str] | None = None) -> None:
         for job_id, job in list(self.jobs.items()):
+            if job_ids is not None and job_id not in job_ids:
+                continue
             if job.state.status != JobStatus.FAILED:
                 continue
             marker = f"{job.job_dir}/retry"
@@ -175,8 +181,10 @@ class Scheduler:
             job.state.current_qr_state = None
             self._write_status(job_id)
 
-    def poll_queued_resources(self) -> None:
+    def poll_queued_resources(self, job_ids: set[str] | None = None) -> None:
         for qr_name, job_id in list(self.queued_resources.items()):
+            if job_ids is not None and job_id not in job_ids:
+                continue
             job = self.jobs.get(job_id)
             if not job:
                 self.queued_resources.pop(qr_name, None)
@@ -288,7 +296,7 @@ class Scheduler:
         if self.backend.delete_queued_resource(qr_name, resource.project, resource.zone):
             self.queued_resources.pop(qr_name, None)
 
-    def schedule_pending_jobs(self) -> None:
+    def schedule_pending_jobs(self, *, stop_after_job_id: str | None = None) -> None:
         chips_by_quota: dict[str, int] = {}
         chips_by_user: dict[str, int] = {}
         for job in self.jobs.values():
@@ -314,9 +322,13 @@ class Scheduler:
             job = self.jobs[job_id]
             resource = self.config.resources.get(job.spec.resources.resource_name)
             if not resource or not resource.enabled:
+                if job_id == stop_after_job_id:
+                    break
                 continue
             quota = self.config.quota_groups[resource.quota_group]
             if chips_by_quota.get(resource.quota_group, 0) + resource.chips > quota.total_chips:
+                if job_id == stop_after_job_id:
+                    break
                 continue
             max_user_chips = self.config.user_limits.max_chips_for(job.spec.submitted_by)
             if (
@@ -324,6 +336,8 @@ class Scheduler:
                 and chips_by_user.get(job.spec.submitted_by, 0) + resource.chips
                 > max_user_chips
             ):
+                if job_id == stop_after_job_id:
+                    break
                 continue
             if self._create_queued_resource(job_id, resource):
                 chips_by_quota[resource.quota_group] = (
@@ -332,6 +346,8 @@ class Scheduler:
                 chips_by_user[job.spec.submitted_by] = (
                     chips_by_user.get(job.spec.submitted_by, 0) + resource.chips
                 )
+            if job_id == stop_after_job_id:
+                break
 
     def _create_queued_resource(self, job_id: str, resource: ResourceConfig) -> bool:
         job = self.jobs[job_id]
@@ -429,15 +445,34 @@ class Scheduler:
                 self.backend.delete_gcs(job.job_dir, recursive=True)
                 del self.jobs[job_id]
 
-    def run_once(self) -> None:
+    def _resolve_job_id(self, job_ref: str) -> str:
+        matches = [
+            job_id
+            for job_id, job in self.jobs.items()
+            if job_ref in {job_id, job.spec.job_id, job.spec.display_name}
+            or job.spec.job_id.endswith(job_ref)
+        ]
+        if not matches:
+            raise ValueError(f"Job not found: {job_ref}")
+        if len(matches) > 1:
+            raise ValueError(f"Job reference is ambiguous: {job_ref} ({', '.join(matches)})")
+        return matches[0]
+
+    def run_once(self, *, focus_job_ref: str | None = None) -> None:
         self.scan_jobs()
-        self.check_canceled_jobs()
-        self.check_completed_jobs()
-        self.check_retry_requests()
-        self.poll_queued_resources()
-        self.schedule_pending_jobs()
-        self.reap_terminal_jobs()
-        self._maybe_reconcile_orphans()
+        focus_job_id = self._resolve_job_id(focus_job_ref) if focus_job_ref else None
+        job_ids = {focus_job_id} if focus_job_id else None
+        self.check_canceled_jobs(job_ids)
+        self.check_completed_jobs(job_ids)
+        self.check_retry_requests(job_ids)
+        self.poll_queued_resources(job_ids)
+        if focus_job_id:
+            if self.jobs[focus_job_id].state.status == JobStatus.PENDING:
+                self.schedule_pending_jobs(stop_after_job_id=focus_job_id)
+        else:
+            self.schedule_pending_jobs()
+            self.reap_terminal_jobs()
+            self._maybe_reconcile_orphans()
         self._maybe_write_scheduler_state()
 
     def run_forever(self) -> None:

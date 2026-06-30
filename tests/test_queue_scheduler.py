@@ -199,6 +199,55 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(state["current_attempt"], 1)
             self.assertEqual(len(backend.queued_resources), 1)
 
+    def test_focused_reconciliation_skips_unrelated_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d), quota_total=16)
+            write_job(backend, config.primary_bucket, make_spec("job-a"))
+            job_b_dir = write_job(backend, config.primary_bucket, make_spec("job-b"))
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once()
+            qr_by_job = {job_id: qr for qr, job_id in scheduler.queued_resources.items()}
+            backend.force_active(qr_by_job["job-a"])
+            backend.force_active(qr_by_job["job-b"])
+            scheduler.run_once()
+
+            backend.force_preempt(qr_by_job["job-a"])
+            backend.write_gcs(f"{job_b_dir}/canceled", "cancel")
+            focused = Scheduler(backend, config)
+            focused.run_once(focus_job_ref="job-a")
+
+            state_a = json.loads(
+                backend.read_gcs(f"{config.primary_bucket}/jobs/job-a/status.json") or "{}"
+            )
+            state_b = json.loads(
+                backend.read_gcs(f"{config.primary_bucket}/jobs/job-b/status.json") or "{}"
+            )
+            self.assertEqual(state_a["status"], JobStatus.PROVISIONING.value)
+            self.assertEqual(state_a["current_attempt"], 1)
+            self.assertEqual(state_b["status"], JobStatus.RUNNING.value)
+            self.assertIn(qr_by_job["job-b"], backend.queued_resources)
+
+    def test_focused_reconciliation_preserves_pending_job_order(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d), quota_total=8)
+            write_job(backend, config.primary_bucket, make_spec("job-older"))
+            write_job(backend, config.primary_bucket, make_spec("job-focus"))
+
+            scheduler = Scheduler(backend, config)
+            scheduler.run_once(focus_job_ref="job-focus")
+
+            state_older = json.loads(
+                backend.read_gcs(f"{config.primary_bucket}/jobs/job-older/status.json") or "{}"
+            )
+            state_focus = json.loads(
+                backend.read_gcs(f"{config.primary_bucket}/jobs/job-focus/status.json") or "{}"
+            )
+            self.assertEqual(state_older["status"], JobStatus.PROVISIONING.value)
+            self.assertEqual(state_focus["status"], JobStatus.PENDING.value)
+
     def test_requeues_ready_unhealthy_maintenance_tpu(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             backend = DryRunBackend(d)

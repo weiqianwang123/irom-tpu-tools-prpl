@@ -149,6 +149,17 @@ For local validation without GCP:
 tpu --dry-run --base-dir /tmp/irom-tpu-queue scheduler --once
 ```
 
+To reconcile one preempted job without waiting on unrelated lifecycle cleanup:
+
+```bash
+tpu scheduler --once --focus-job JOB_ID
+```
+
+Focused reconciliation still scans authoritative queue state and schedules any
+older pending jobs ahead of the target. It skips cancellation, completion,
+polling, retention, and orphan cleanup for unrelated jobs; run the normal
+scheduler afterward for full global reconciliation.
+
 The scheduler loop:
 
 1. Scans regional queue buckets for jobs.

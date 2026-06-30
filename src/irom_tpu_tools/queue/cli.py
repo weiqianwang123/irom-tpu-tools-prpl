@@ -871,10 +871,15 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     config = _load_config(args)
     backend = _backend(args)
     scheduler = Scheduler(backend, config)
+    if args.focus_job and not args.once:
+        raise SystemExit("--focus-job requires --once")
     if args.once:
         if isinstance(backend, DryRunBackend):
             backend.tick()
-        scheduler.run_once()
+        try:
+            scheduler.run_once(focus_job_ref=args.focus_job)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         scheduler._maybe_write_scheduler_state(force=True)
         return 0
     while True:
@@ -1115,6 +1120,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     scheduler = sub.add_parser("scheduler", help="Run central scheduler")
     scheduler.add_argument("--once", action="store_true")
+    scheduler.add_argument(
+        "--focus-job",
+        help="Reconcile one job first without polling unrelated job lifecycles (requires --once)",
+    )
     scheduler.add_argument("--scan-interval", type=int)
     scheduler.add_argument("--verbose", "-v", action="store_true")
     scheduler.set_defaults(func=cmd_scheduler)
