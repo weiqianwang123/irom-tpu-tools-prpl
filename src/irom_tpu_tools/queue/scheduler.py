@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 import json
 import logging
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_TPU_VM_STATES = {"PREEMPTED", "TERMINATED", "STOPPED", "DELETED", "FAILED"}
 RETRY_TPU_VM_HEALTH = {"UNHEALTHY_MAINTENANCE"}
+JOB_SCAN_WORKERS = 8
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -54,33 +56,46 @@ class Scheduler:
             self._scan_bucket(bucket)
 
     def _scan_bucket(self, bucket: str) -> None:
-        for job_dir in self.backend.list_gcs(f"{bucket.rstrip('/')}/jobs/"):
+        bucket = bucket.rstrip("/")
+        pending: list[tuple[str, str]] = []
+        for job_dir in self.backend.list_gcs(f"{bucket}/jobs/"):
             job_id = job_dir.rstrip("/").rsplit("/", 1)[-1]
             if job_id in self.jobs:
                 continue
-            spec_json = self.backend.read_gcs(f"{bucket.rstrip('/')}/jobs/{job_id}/spec.json")
-            if not spec_json:
-                continue
-            try:
-                spec = JobSpec.from_dict(json.loads(spec_json))
-                status_json = self.backend.read_gcs(
-                    f"{bucket.rstrip('/')}/jobs/{job_id}/status.json"
-                )
-                state = (
-                    JobState.from_dict(json.loads(status_json))
-                    if status_json
-                    else JobState.new()
-                )
-            except (json.JSONDecodeError, KeyError, ValueError) as exc:
-                logger.warning("Skipping invalid job %s: %s", job_id, exc)
-                continue
-            job = Job(spec=spec, state=state, bucket=bucket.rstrip("/"))
-            self.jobs[job_id] = job
-            if (
-                state.status in {JobStatus.PROVISIONING, JobStatus.RUNNING}
-                and state.current_qr_name
-            ):
-                self.queued_resources[state.current_qr_name] = job_id
+            pending.append((job_id, bucket))
+
+        with ThreadPoolExecutor(max_workers=JOB_SCAN_WORKERS) as executor:
+            loaded = executor.map(lambda item: self._load_job(*item), pending)
+            for job_id, job in loaded:
+                if job is None:
+                    continue
+                self._add_job(job_id, job)
+
+    def _load_job(self, job_id: str, bucket: str) -> tuple[str, Job | None]:
+        spec_json = self.backend.read_gcs(f"{bucket}/jobs/{job_id}/spec.json")
+        if not spec_json:
+            return job_id, None
+        try:
+            spec = JobSpec.from_dict(json.loads(spec_json))
+            status_json = self.backend.read_gcs(f"{bucket}/jobs/{job_id}/status.json")
+            state = (
+                JobState.from_dict(json.loads(status_json))
+                if status_json
+                else JobState.new()
+            )
+        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+            logger.warning("Skipping invalid job %s: %s", job_id, exc)
+            return job_id, None
+        return job_id, Job(spec=spec, state=state, bucket=bucket)
+
+    def _add_job(self, job_id: str, job: Job) -> None:
+        state = job.state
+        self.jobs[job_id] = job
+        if (
+            state.status in {JobStatus.PROVISIONING, JobStatus.RUNNING}
+            and state.current_qr_name
+        ):
+            self.queued_resources[state.current_qr_name] = job_id
 
     def _write_status(self, job_id: str) -> None:
         job = self.jobs[job_id]

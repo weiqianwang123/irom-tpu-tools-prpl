@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import UTC, datetime
 import io
 import json
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 
 from irom_tpu_tools.queue.backend import DryRunBackend
@@ -136,6 +137,37 @@ interactive_tpus: {}
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_scans_independent_job_records_concurrently(self) -> None:
+        class TrackingBackend(DryRunBackend):
+            def __init__(self, base_dir: str):
+                super().__init__(base_dir)
+                self.active_reads = 0
+                self.max_active_reads = 0
+                self.read_lock = threading.Lock()
+
+            def read_gcs(self, url: str) -> str | None:
+                with self.read_lock:
+                    self.active_reads += 1
+                    self.max_active_reads = max(self.max_active_reads, self.active_reads)
+                try:
+                    time.sleep(0.01)
+                    return super().read_gcs(url)
+                finally:
+                    with self.read_lock:
+                        self.active_reads -= 1
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = TrackingBackend(d)
+            config = make_config(Path(d))
+            for index in range(4):
+                write_job(backend, config.primary_bucket, make_spec(f"job-{index}"))
+
+            scheduler = Scheduler(backend, config)
+            scheduler.scan_jobs()
+
+            self.assertEqual(len(scheduler.jobs), 4)
+            self.assertGreater(backend.max_active_reads, 1)
+
     def test_schedules_and_requeues_after_preemption(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             backend = DryRunBackend(d)
