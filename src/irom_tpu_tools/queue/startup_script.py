@@ -63,6 +63,7 @@ QR_NAME={shlex.quote(qr_name)}
 DEPLOY_DIR="$HOME/deployed_code/$JOB_ID/attempt-$ATTEMPT"
 LOG_DIR=/job_logs
 HEARTBEAT_INTERVAL={int(heartbeat_interval)}
+LOG_UPLOAD_INTERVAL={int(heartbeat_interval)}
 
 get_worker_id() {{
   if [[ -n "${{TPU_WORKER_ID:-}}" ]]; then
@@ -93,11 +94,24 @@ echo "WORKER_ID=$WORKER_ID"
 
 RECEIVED_SIGTERM=0
 HEARTBEAT_PID=""
+LOG_UPLOAD_PID=""
 
 heartbeat_loop() {{
   while true; do
     date -Iseconds | gsutil cp - "$JOB_DIR/attempts/attempt-$ATTEMPT/heartbeat" || true
     sleep "$HEARTBEAT_INTERVAL"
+  done
+}}
+
+upload_log() {{
+  gsutil -q cp "$LOG_DIR/worker-$WORKER_ID.log" "$JOB_DIR/logs/attempt-$ATTEMPT/worker-$WORKER_ID.log" \
+    >/dev/null 2>&1 || true
+}}
+
+log_upload_loop() {{
+  while true; do
+    sleep "$LOG_UPLOAD_INTERVAL"
+    upload_log
   done
 }}
 
@@ -116,9 +130,12 @@ cleanup() {{
   if [[ -n "$HEARTBEAT_PID" ]]; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
   fi
+  if [[ -n "$LOG_UPLOAD_PID" ]]; then
+    kill "$LOG_UPLOAD_PID" 2>/dev/null || true
+  fi
   echo "JOB_EXIT=$rc"
   echo "JOB_END=$(date -Iseconds)"
-  gsutil cp "$LOG_DIR/worker-$WORKER_ID.log" "$JOB_DIR/logs/attempt-$ATTEMPT/worker-$WORKER_ID.log" || true
+  upload_log
   if [[ "$WORKER_ID" == "0" ]]; then
     if [[ "$rc" == "0" ]]; then
       echo "SUCCESS $(date -Iseconds)" | gsutil cp - "$JOB_DIR/succeeded"
@@ -130,6 +147,9 @@ cleanup() {{
   fi
 }}
 trap cleanup EXIT
+
+log_upload_loop &
+LOG_UPLOAD_PID=$!
 
 {_secret_lines(spec.secret_refs, project)}
 {_export_lines(env_vars)}

@@ -316,6 +316,9 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("/attempts/attempt-$ATTEMPT/claimed", script)
         self.assertIn("/attempts/attempt-$ATTEMPT/heartbeat", script)
         self.assertIn("/logs/attempt-$ATTEMPT/worker-$WORKER_ID.log", script)
+        self.assertIn("log_upload_loop &", script)
+        self.assertIn('gsutil -q cp "$LOG_DIR/worker-$WORKER_ID.log"', script)
+        self.assertLess(script.index("log_upload_loop &"), script.index('echo "Running setup"'))
         self.assertNotIn(".tpu-jobs", script)
         self.assertNotIn("watch.pid", script)
 
