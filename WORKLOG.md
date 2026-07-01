@@ -204,6 +204,25 @@ Validation:
   `/tmp/irom-personal-scheduler-smoke-20260701`: passed.
 - `git diff --check`: passed.
 
-No new TPU job was submitted and no live TPU resource was modified during code
-validation. Live installation and replacement of legacy scheduler loops remain
-pending until the validated commit is integrated into `main`.
+Deployment and live verification:
+
+- Fast-forwarded the complete installed queue/preemption history and this
+  change onto `main`, then pushed `main` through `046d423`.
+- Reinstalled `irom-tpu-tools` from the merged checkout with `pipx` and enabled
+  `/home/lzha/.config/systemd/user/irom-tpu-scheduler.service` with
+  `Linger=yes`. The active command is the installed CLI with
+  `--focus-user=lzha --scan-interval=30` and the rotating local log at
+  `~/.local/state/irom-tpu-tools/scheduler.log`.
+- Stopped legacy per-job scheduler loops without stopping or resubmitting any
+  training process. A live singleton smoke returned the expected
+  `Another local TPU scheduler is active` error, and process inspection showed
+  exactly one remaining scheduler.
+- The service classified existing maintenance/suspension exits as
+  `INFRASTRUCTURE_PREEMPTION`. It queued a replacement attempt for the existing
+  reasoning evaluation; that resource reached `WAITING_FOR_RESOURCES`. A
+  replacement request for the existing G3 training job received GCP HTTP 429
+  because the 512-chip v6e preemptible project/zone quota was exhausted, so the
+  job correctly remained `PENDING` for a later scan.
+- `tpu status` exposed retryability and recovery guidance for the affected
+  attempts. No new TPU job spec was submitted during implementation or
+  deployment.
