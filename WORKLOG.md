@@ -249,3 +249,14 @@ Validation:
 - `PYTHONPATH=src python3 -m unittest discover -s tests`: 35 passed.
 - `PYTHONPATH=src python3 -m compileall -q src tests`: passed.
 - `uvx ruff check src tests`: passed.
+
+Deployment verification:
+- Fast-forwarded and pushed `main` through `284d99e`, reinstalled the pipx
+  package from the canonical `/home/lzha/code/irom-tpu-tools` checkout, and
+  restarted the enabled user service. The installed scheduler source hash
+  matched `main`.
+- The live service received HTTP 429 quota responses for the existing reasoning
+  evaluation and G3 training jobs, left both jobs pending, and logged a
+  300-second create deferral for each job.
+- Process inspection showed exactly one scheduler process and no legacy
+  per-job scheduler loop. No new job spec was submitted.
