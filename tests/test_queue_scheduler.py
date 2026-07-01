@@ -4,12 +4,14 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import Mock
 
-from irom_tpu_tools.queue.backend import DryRunBackend
+from irom_tpu_tools.queue.backend import DryRunBackend, GCPBackend
 from irom_tpu_tools.queue.cli import build_parser
 from irom_tpu_tools.queue.config import QueueConfig, load_config
 from irom_tpu_tools.queue.interactive import _permission_hint, resolve_interactive_tpu
@@ -137,6 +139,21 @@ interactive_tpus: {}
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_gcp_cleanup_uses_async_force_delete_for_active_resources(self) -> None:
+        backend = GCPBackend()
+        run = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        backend._run = run
+
+        self.assertTrue(backend.delete_queued_resource("qr-a", "project", "zone"))
+        qr_command = run.call_args.args[0]
+        self.assertIn("--force", qr_command)
+        self.assertIn("--async", qr_command)
+
+        run.reset_mock()
+        self.assertTrue(backend.delete_tpu_vm("qr-a", "project", "zone"))
+        vm_command = run.call_args.args[0]
+        self.assertIn("--async", vm_command)
+
     def test_scans_independent_job_records_concurrently(self) -> None:
         class TrackingBackend(DryRunBackend):
             def __init__(self, base_dir: str):

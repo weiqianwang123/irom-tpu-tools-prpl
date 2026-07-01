@@ -260,6 +260,8 @@ class GCPBackend(Backend):
             project,
             "--zone",
             zone,
+            "--force",
+            "--async",
             "--quiet",
         ]
         result = self._run(cmd, check=False, timeout=120)
@@ -283,6 +285,7 @@ class GCPBackend(Backend):
             project,
             "--zone",
             zone,
+            "--async",
             "--quiet",
         ]
         result = self._run(cmd, check=False, timeout=120)
