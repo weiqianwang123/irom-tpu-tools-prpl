@@ -527,6 +527,21 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("v4-4-04-interactive", config.interactive_tpus)
         self.assertEqual(config.interactive_tpus["v4-16-01-interactive"].workers, 4)
 
+    def test_default_config_has_v6e_four_chips_per_worker(self) -> None:
+        config = load_config()
+        expected_workers = {
+            "v6-8": 2,
+            "v6-16": 4,
+            "v6-32": 8,
+            "v6-64": 16,
+            "v6-128": 32,
+        }
+
+        for resource_name, workers in expected_workers.items():
+            resource = config.resources[resource_name]
+            self.assertEqual(resource.workers, workers)
+            self.assertEqual(resource.chips, workers * 4)
+
     def test_interactive_parser_has_no_lifecycle_verbs(self) -> None:
         parser = build_parser()
         help_text = parser.format_help()

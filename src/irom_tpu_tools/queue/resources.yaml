@@ -116,7 +116,7 @@ resources:
     zone: us-east1-d
     project: mae-irom-lab-guided-data
     chips: 8
-    workers: 1
+    workers: 2
     spot: true
     enabled: true
     quota_group: v6
@@ -128,7 +128,7 @@ resources:
     zone: us-east1-d
     project: mae-irom-lab-guided-data
     chips: 16
-    workers: 2
+    workers: 4
     spot: true
     enabled: true
     quota_group: v6
@@ -140,7 +140,7 @@ resources:
     zone: us-east1-d
     project: mae-irom-lab-guided-data
     chips: 32
-    workers: 4
+    workers: 8
     spot: true
     enabled: true
     quota_group: v6
@@ -152,7 +152,7 @@ resources:
     zone: us-east1-d
     project: mae-irom-lab-guided-data
     chips: 64
-    workers: 8
+    workers: 16
     spot: true
     enabled: true
     quota_group: v6
@@ -164,7 +164,7 @@ resources:
     zone: us-east1-d
     project: mae-irom-lab-guided-data
     chips: 128
-    workers: 16
+    workers: 32
     spot: true
     enabled: false
     quota_group: v6

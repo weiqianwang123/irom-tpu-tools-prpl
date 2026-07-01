@@ -131,3 +131,25 @@ long-running process remains.
 Implementation commits:
 - `a1fb0367ab10762eabfe5d29f61acc34f8d7b02c`
 - `4df0f8cf06ebfaf82a6933fc29b12629a678624b`
+
+## 2026-06-30 - Correct v6e Worker Topology
+
+Agent: `gemma3-oxe-b2048-20260630`
+
+Goal: make queue resource metadata match the current four-chip-per-worker v6e
+topology observed by multi-host JAX and the TPU VM SSH API.
+
+Findings and changes:
+- A live `v6e-64` allocation exposed workers 0 through 15, each with four local
+  TPU devices. JAX reported 16 processes and 64 global devices. Existing queue
+  metadata incorrectly advertised eight workers.
+- Updated all v6e resource entries consistently: `v6-8` has 2 workers,
+  `v6-16` has 4, `v6-32` has 8, `v6-64` has 16, and disabled `v6-128` has 32.
+  Chip counts, accelerator types, quotas, and launch behavior are unchanged.
+- Added a default-config regression test that checks every v6e worker count and
+  enforces four chips per worker.
+
+Validation:
+- `uv run --with pytest pytest -q`: 26 passed.
+- `uvx ruff check tests/test_queue_scheduler.py`: passed.
+- `git diff --check`: passed.
