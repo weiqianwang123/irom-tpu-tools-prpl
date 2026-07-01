@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import fcntl
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
@@ -962,9 +963,23 @@ def cmd_admin_cleanup(args: argparse.Namespace) -> int:
 
 
 def cmd_scheduler(args: argparse.Namespace) -> int:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if args.log_file:
+        log_path = Path(args.log_file).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            RotatingFileHandler(
+                log_path,
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+        )
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
     )
     config = _load_config(args)
     backend = _backend(args)
@@ -1234,6 +1249,10 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler.add_argument(
         "--lock-file",
         help="Local singleton lock path (default: ~/.cache/irom-tpu-tools/scheduler.lock)",
+    )
+    scheduler.add_argument(
+        "--log-file",
+        help="Optional rotating scheduler log file",
     )
     scheduler.add_argument("--verbose", "-v", action="store_true")
     scheduler.set_defaults(func=cmd_scheduler)

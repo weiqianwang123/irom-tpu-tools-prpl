@@ -179,8 +179,8 @@ Changes:
   completion, and retries are restricted to the selected user.
 - Added a local `flock` singleton guard and a systemd user-service template so
   per-job scheduler loops cannot race the personal scheduler. The service
-  writes low-volume local logs under `~/.local/state/irom-tpu-tools/` because
-  this workstation does not expose the user journal to the account.
+  uses the CLI's bounded rotating log under `~/.local/state/irom-tpu-tools/`
+  because this workstation does not expose the user journal to the account.
 - Added structured attempt outcomes for infrastructure preemption, setup
   errors, and application errors, including retryability, phase, worker, and
   exit code. `tpu status` now prints the recovery policy and exact log command.
