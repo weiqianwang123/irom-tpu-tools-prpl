@@ -173,6 +173,7 @@ install -Dm644 contrib/systemd/irom-tpu-scheduler.service \
 systemctl --user daemon-reload
 systemctl --user enable --now irom-tpu-scheduler.service
 systemctl --user status irom-tpu-scheduler.service
+tail -n 100 "$HOME/.local/state/irom-tpu-tools/scheduler.log"
 ```
 
 The unit runs:
