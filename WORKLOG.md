@@ -159,3 +159,49 @@ Validation:
 - `uv run --with pytest pytest -q`: 26 passed.
 - `uvx ruff check tests/test_queue_scheduler.py`: passed.
 - `git diff --check`: passed.
+
+## 2026-07-01 - Personal Scheduler Auto-Resume And Failure Classification
+
+Agent: `personal-tpu-autoresume-20260701`
+
+Goal: replace agent-owned one-shot reconciliation loops with one local
+single-user scheduler that automatically recovers infrastructure preemptions,
+while keeping setup and application errors terminal and actionable.
+
+Base revision: `96170c83631cb247478041c7e5359b65db1d96fc`, containing the
+13 unmerged queue/preemption fixes currently installed on this workstation.
+The separate command-quoting branch was patch-equivalent to later commits in
+this base and required no additional integration commit.
+
+Changes:
+- Added continuous `--focus-user` scheduling. Other users' status is refreshed
+  for quota accounting, but lifecycle operations, scheduling, cancellation,
+  completion, and retries are restricted to the selected user.
+- Added a local `flock` singleton guard and a systemd user-service template so
+  per-job scheduler loops cannot race the personal scheduler.
+- Added structured attempt outcomes for infrastructure preemption, setup
+  errors, and application errors, including retryability, phase, worker, and
+  exit code. `tpu status` now prints the recovery policy and exact log command.
+- Changed new workers to use attempt-scoped success/failure markers. Every
+  worker can report a terminal error; infrastructure state is reconciled before
+  worker markers so preemption wins over secondary distributed-process exits.
+- Versioned new startup attempts so stale legacy root markers cannot terminate
+  a replacement attempt, while preserving old-attempt compatibility.
+- Verified each downloaded code archive against the immutable SHA-256 checksum
+  stored in the submitted job spec before setup or training begins.
+- Documented installation, scope, retry policy, workstation availability, and
+  log-polling constraints.
+
+Validation:
+- `PYTHONPATH=src python3 -m unittest discover -s tests`: 32 passed.
+- `PYTHONPATH=src python3 -m compileall -q src tests`: passed.
+- `uvx ruff check src tests`: passed.
+- `systemd-analyze --user verify contrib/systemd/irom-tpu-scheduler.service`:
+  passed.
+- Focused-user dry-run scheduler smoke under
+  `/tmp/irom-personal-scheduler-smoke-20260701`: passed.
+- `git diff --check`: passed.
+
+No new TPU job was submitted and no live TPU resource was modified during code
+validation. Live installation and replacement of legacy scheduler loops remain
+pending until the validated commit is integrated into `main`.

@@ -28,10 +28,10 @@ gs://.../tpu-job-queue/
     canceled
     retry
     running
-    succeeded
-    failed
     attempts/attempt-1/claimed
     attempts/attempt-1/heartbeat
+    attempts/attempt-1/succeeded
+    attempts/attempt-1/failed
     logs/attempt-1/worker-0.log
 ```
 
@@ -77,6 +77,10 @@ tpu status <job_id_or_name>
 tpu logs <job_id_or_name> --lines 200
 tpu tail <job_id_or_name> --follow
 ```
+
+Avoid leaving `tpu tail --follow` running as a background monitor. It polls GCS
+log objects repeatedly. Use `tpu status` for routine monitoring and fetch logs
+when a job changes state or requires diagnosis.
 
 By default, `tpu list [v4|v5|v6]` shows active queued jobs and live TPU VMs
 visible to the current account. Canceled, failed, and succeeded job records are
@@ -160,6 +164,39 @@ The scheduler must run under an identity with TPU Admin permissions:
 tpu scheduler --scan-interval 30
 ```
 
+For a personal scheduler on a workstation that must not reconcile other users'
+jobs, install the included user service and scope it to the local account:
+
+```bash
+install -Dm644 contrib/systemd/irom-tpu-scheduler.service \
+  "$HOME/.config/systemd/user/irom-tpu-scheduler.service"
+systemctl --user daemon-reload
+systemctl --user enable --now irom-tpu-scheduler.service
+systemctl --user status irom-tpu-scheduler.service
+```
+
+The unit runs:
+
+```bash
+tpu scheduler --focus-user="$USER" --scan-interval 30
+```
+
+Only one local scheduler can hold the scheduler lock. Stop legacy per-job
+`scheduler --once` loops before enabling the service. `--focus-user` reads
+other users' statuses for quota accounting but performs lifecycle operations
+only for jobs whose `submitted_by` matches the selected user. It does not run
+global orphan cleanup or terminal-record retention.
+
+A user service survives terminal closure and starts at login. To keep it alive
+after logout, an administrator can enable systemd user lingering:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+The scheduler still stops whenever the workstation is powered off, asleep, or
+disconnected from GCP.
+
 For local validation without GCP:
 
 ```bash
@@ -182,7 +219,8 @@ The scheduler loop:
 1. Scans regional queue buckets for jobs.
 2. Handles cancel/retry/completion sentinels.
 3. Polls queue-owned QRs.
-4. Requeues preempted/suspended/failed attempts until `max_attempts`.
+4. Requeues preempted, suspended, missing, or unhealthy infrastructure attempts
+   until `max_attempts`.
 5. Enforces quota groups and per-user chip limits.
 6. Deletes terminal or orphaned queue-owned resources.
 7. Writes `scheduler_state.json` for fast CLI listing.
@@ -190,6 +228,13 @@ The scheduler loop:
 The packaged config sets `admin: null` under `user_limits.users`, which means
 jobs submitted as user `admin` are not capped by the per-user chip limit. Global
 quota-group limits still apply.
+
+New attempt records distinguish `INFRASTRUCTURE_PREEMPTION`, `SETUP_ERROR`, and
+`APPLICATION_ERROR`. Infrastructure failures are retried automatically from the
+same immutable job spec. Setup and application errors are terminal: run
+`tpu status JOB`, inspect the indicated worker logs, and diagnose the code,
+configuration, data, checkpoint, and metrics before requesting `tpu retry` or
+submitting a corrected job.
 
 ## Admin Commands
 

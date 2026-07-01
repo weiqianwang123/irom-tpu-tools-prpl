@@ -12,6 +12,7 @@ from .backend import Backend
 from .config import QueueConfig
 from .startup_script import write_startup_script
 from .types import (
+    AttemptFailureType,
     AttemptRecord,
     Job,
     JobSpec,
@@ -97,6 +98,32 @@ class Scheduler:
         ):
             self.queued_resources[state.current_qr_name] = job_id
 
+    def _refresh_job_states(self, job_ids: set[str]) -> None:
+        def load_state(job_id: str) -> tuple[str, JobState | None]:
+            job = self.jobs[job_id]
+            status_json = self.backend.read_gcs(f"{job.job_dir}/status.json")
+            if not status_json:
+                return job_id, None
+            try:
+                return job_id, JobState.from_dict(json.loads(status_json))
+            except (json.JSONDecodeError, KeyError, ValueError):
+                return job_id, None
+
+        with ThreadPoolExecutor(max_workers=JOB_SCAN_WORKERS) as executor:
+            refreshed = executor.map(load_state, sorted(job_ids))
+            for job_id, state in refreshed:
+                if state is None:
+                    continue
+                for qr_name, mapped_job_id in list(self.queued_resources.items()):
+                    if mapped_job_id == job_id:
+                        self.queued_resources.pop(qr_name, None)
+                self.jobs[job_id].state = state
+                if (
+                    state.status in {JobStatus.PROVISIONING, JobStatus.RUNNING}
+                    and state.current_qr_name
+                ):
+                    self.queued_resources[state.current_qr_name] = job_id
+
     def _write_status(self, job_id: str) -> None:
         job = self.jobs[job_id]
         job.state.last_updated = utc_now()
@@ -134,15 +161,64 @@ class Scheduler:
                 continue
             if job.state.status != JobStatus.RUNNING:
                 continue
-            if self.backend.exists_gcs(f"{job.job_dir}/succeeded"):
+            attempt = job.state.current_attempt + 1
+            succeeded = self.backend.read_gcs(
+                f"{job.job_dir}/attempts/attempt-{attempt}/succeeded"
+            )
+            failed = self.backend.read_gcs(
+                f"{job.job_dir}/attempts/attempt-{attempt}/failed"
+            )
+            # Existing attempts created by older startup scripts use root markers.
+            startup_version = self.backend.read_gcs(
+                f"{job.job_dir}/attempts/attempt-{attempt}/startup_version"
+            )
+            if startup_version is None:
+                if succeeded is None:
+                    succeeded = self.backend.read_gcs(f"{job.job_dir}/succeeded")
+                if failed is None:
+                    failed = self.backend.read_gcs(f"{job.job_dir}/failed")
+            if failed is not None:
+                report = self._parse_failure_report(failed)
+                self._finish_job(job_id, report["message"], report)
+            elif succeeded is not None:
                 self._finish_job(job_id, None)
-            elif self.backend.exists_gcs(f"{job.job_dir}/failed"):
-                error = self.backend.read_gcs(f"{job.job_dir}/failed") or "FAILED"
-                self._finish_job(job_id, error.strip())
 
-    def _finish_job(self, job_id: str, error: str | None) -> None:
+    @staticmethod
+    def _parse_failure_report(text: str) -> dict[str, object]:
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        failure_type = str(
+            raw.get("failure_type") or AttemptFailureType.APPLICATION_ERROR.value
+        )
+        message = str(raw.get("message") or text.strip() or "FAILED")
+
+        def optional_int(value: object) -> int | None:
+            try:
+                return None if value is None else int(value)
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "failure_type": failure_type,
+            "message": message,
+            "phase": raw.get("phase"),
+            "worker_id": optional_int(raw.get("worker_id")),
+            "exit_code": optional_int(raw.get("exit_code")),
+        }
+
+    def _finish_job(
+        self,
+        job_id: str,
+        error: str | None,
+        failure_report: dict[str, object] | None = None,
+    ) -> None:
         job = self.jobs[job_id]
         attempt = job.state.current_attempt + 1
+        report = failure_report or {}
         job.state.attempts.append(
             AttemptRecord(
                 attempt=attempt,
@@ -150,6 +226,23 @@ class Scheduler:
                 started_at=job.state.provisioned_at or "",
                 ended_at=utc_now(),
                 error=error,
+                failure_type=(
+                    str(report["failure_type"])
+                    if report.get("failure_type") is not None
+                    else None
+                ),
+                retryable=False if error else None,
+                phase=(str(report["phase"]) if report.get("phase") is not None else None),
+                worker_id=(
+                    int(report["worker_id"])
+                    if report.get("worker_id") is not None
+                    else None
+                ),
+                exit_code=(
+                    int(report["exit_code"])
+                    if report.get("exit_code") is not None
+                    else None
+                ),
             )
         )
         job.state.current_attempt = attempt
@@ -159,6 +252,16 @@ class Scheduler:
         job.state.current_qr_name = None
         job.state.current_qr_state = None
         self._write_status(job_id)
+        if error:
+            logger.error(
+                "Job %s attempt %s failed (%s); inspect worker logs before retrying: %s",
+                job_id,
+                attempt,
+                report.get("failure_type") or AttemptFailureType.APPLICATION_ERROR.value,
+                error,
+            )
+        else:
+            logger.info("Job %s attempt %s succeeded", job_id, attempt)
         if current_qr and resource:
             self._cleanup_job_resources(current_qr, resource)
 
@@ -173,6 +276,7 @@ class Scheduler:
                 continue
             self.backend.delete_gcs(marker)
             self.backend.delete_gcs(f"{job.job_dir}/failed")
+            self.backend.delete_gcs(f"{job.job_dir}/succeeded")
             if job.state.current_attempt >= job.spec.max_attempts:
                 logger.warning("Retry requested for %s but max attempts reached", job_id)
                 self._write_status(job_id)
@@ -272,13 +376,17 @@ class Scheduler:
         self, job_id: str, qr_name: str, resource: ResourceConfig, error: str
     ) -> None:
         job = self.jobs[job_id]
+        attempt = job.state.current_attempt + 1
+        retryable = attempt < job.spec.max_attempts
         job.state.attempts.append(
             AttemptRecord(
-                attempt=job.state.current_attempt + 1,
+                attempt=attempt,
                 qr_name=qr_name,
                 started_at=job.state.provisioned_at or "",
                 ended_at=utc_now(),
                 error=error,
+                failure_type=AttemptFailureType.INFRASTRUCTURE_PREEMPTION.value,
+                retryable=retryable,
             )
         )
         job.state.current_attempt += 1
@@ -289,15 +397,25 @@ class Scheduler:
             job.state.status = JobStatus.FAILED
         else:
             job.state.status = JobStatus.PENDING
+        self.backend.delete_gcs(f"{job.job_dir}/failed")
+        self.backend.delete_gcs(f"{job.job_dir}/succeeded")
         self._cleanup_job_resources(qr_name, resource)
         self._write_status(job_id)
+        action = "automatic retry" if retryable else "max attempts reached"
+        logger.warning(
+            "Job %s attempt %s had infrastructure failure %s; %s",
+            job_id,
+            attempt,
+            error,
+            action,
+        )
 
     def _cleanup_job_resources(self, qr_name: str, resource: ResourceConfig) -> None:
         self.backend.delete_tpu_vm(qr_name, resource.project, resource.zone)
         if self.backend.delete_queued_resource(qr_name, resource.project, resource.zone):
             self.queued_resources.pop(qr_name, None)
 
-    def schedule_pending_jobs(self, *, only_job_id: str | None = None) -> None:
+    def schedule_pending_jobs(self, *, only_job_ids: set[str] | None = None) -> None:
         chips_by_quota: dict[str, int] = {}
         chips_by_user: dict[str, int] = {}
         for job in self.jobs.values():
@@ -317,7 +435,7 @@ class Scheduler:
             (job.spec.priority, job.spec.submit_time, job_id)
             for job_id, job in self.jobs.items()
             if job.state.status == JobStatus.PENDING
-            and (only_job_id is None or job_id == only_job_id)
+            and (only_job_ids is None or job_id in only_job_ids)
         ]
         pending.sort()
         for _, _, job_id in pending:
@@ -347,6 +465,9 @@ class Scheduler:
         job = self.jobs[job_id]
         attempt = job.state.current_attempt + 1
         qr_name = self._generate_qr_name(job, attempt)
+        # Clear only legacy root markers. New startup scripts write attempt-scoped markers.
+        self.backend.delete_gcs(f"{job.job_dir}/failed")
+        self.backend.delete_gcs(f"{job.job_dir}/succeeded")
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as tmp:
             script_path = tmp.name
         write_startup_script(
@@ -373,6 +494,10 @@ class Scheduler:
         )
         if not ok:
             return False
+        self.backend.write_gcs(
+            f"{job.job_dir}/attempts/attempt-{attempt}/startup_version",
+            "2\n",
+        )
         self.queued_resources[qr_name] = job_id
         job.state.status = JobStatus.PROVISIONING
         job.state.current_qr_name = qr_name
@@ -452,17 +577,33 @@ class Scheduler:
             raise ValueError(f"Job reference is ambiguous: {job_ref} ({', '.join(matches)})")
         return matches[0]
 
-    def run_once(self, *, focus_job_ref: str | None = None) -> None:
+    def run_once(
+        self,
+        *,
+        focus_job_ref: str | None = None,
+        focus_user: str | None = None,
+    ) -> None:
+        if focus_job_ref and focus_user:
+            raise ValueError("Cannot combine focus_job_ref and focus_user")
         self.scan_jobs()
         focus_job_id = self._resolve_job_id(focus_job_ref) if focus_job_ref else None
-        job_ids = {focus_job_id} if focus_job_id else None
+        if focus_job_id:
+            job_ids = {focus_job_id}
+        elif focus_user:
+            job_ids = {
+                job_id
+                for job_id, job in self.jobs.items()
+                if job.spec.submitted_by == focus_user
+            }
+            self._refresh_job_states(set(self.jobs) - job_ids)
+        else:
+            job_ids = None
         self.check_canceled_jobs(job_ids)
+        self.poll_queued_resources(job_ids)
         self.check_completed_jobs(job_ids)
         self.check_retry_requests(job_ids)
-        self.poll_queued_resources(job_ids)
-        if focus_job_id:
-            if self.jobs[focus_job_id].state.status == JobStatus.PENDING:
-                self.schedule_pending_jobs(only_job_id=focus_job_id)
+        if job_ids is not None:
+            self.schedule_pending_jobs(only_job_ids=job_ids)
         else:
             self.schedule_pending_jobs()
             self.reap_terminal_jobs()

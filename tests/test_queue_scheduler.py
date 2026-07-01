@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 from irom_tpu_tools.queue.backend import DryRunBackend, GCPBackend
 from irom_tpu_tools.queue.cli import (
     _command_from_args,
+    _scheduler_lock,
     _shell_join_command,
     build_parser,
 )
@@ -22,6 +23,7 @@ from irom_tpu_tools.queue.interactive import _permission_hint, resolve_interacti
 from irom_tpu_tools.queue.scheduler import Scheduler
 from irom_tpu_tools.queue.startup_script import build_startup_script
 from irom_tpu_tools.queue.types import (
+    AttemptRecord,
     JobResources,
     JobSpec,
     JobState,
@@ -281,6 +283,11 @@ class SchedulerTests(unittest.TestCase):
             )
             self.assertEqual(state["status"], "PROVISIONING")
             self.assertEqual(state["current_attempt"], 1)
+            self.assertEqual(
+                state["attempts"][0]["failure_type"],
+                "INFRASTRUCTURE_PREEMPTION",
+            )
+            self.assertTrue(state["attempts"][0]["retryable"])
             self.assertEqual(len(backend.queued_resources), 1)
 
     def test_application_retry_advances_to_a_fresh_attempt(self) -> None:
@@ -295,6 +302,7 @@ class SchedulerTests(unittest.TestCase):
             backend.force_active(first_qr)
             scheduler.run_once()
 
+            backend.delete_gcs(f"{job_dir}/attempts/attempt-1/startup_version")
             backend.write_gcs(f"{job_dir}/failed", "FAILED with exit code 1")
             scheduler.run_once()
             failed_state = json.loads(backend.read_gcs(f"{job_dir}/status.json") or "{}")
@@ -309,6 +317,123 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(retry_state["current_attempt"], 1)
             self.assertNotEqual(retry_state["current_qr_name"], first_qr)
             self.assertTrue(retry_state["current_qr_name"].endswith("-a2"))
+
+    def test_structured_worker_failure_is_terminal_and_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-a"))
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once()
+            qr_name = next(iter(backend.queued_resources))
+            backend.force_active(qr_name)
+            scheduler.run_once()
+            report = {
+                "failure_type": "SETUP_ERROR",
+                "phase": "setup",
+                "worker_id": "3",
+                "exit_code": 17,
+                "message": "Worker 3 exited with code 17 during setup",
+            }
+            backend.write_gcs(
+                f"{job_dir}/attempts/attempt-1/failed",
+                json.dumps(report),
+            )
+
+            scheduler.run_once()
+            state = json.loads(backend.read_gcs(f"{job_dir}/status.json") or "{}")
+            self.assertEqual(state["status"], JobStatus.FAILED.value)
+            attempt = state["attempts"][0]
+            self.assertEqual(attempt["failure_type"], "SETUP_ERROR")
+            self.assertFalse(attempt["retryable"])
+            self.assertEqual(attempt["phase"], "setup")
+            self.assertEqual(attempt["worker_id"], 3)
+            self.assertEqual(attempt["exit_code"], 17)
+
+    def test_new_attempt_ignores_stale_legacy_root_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-a"))
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once()
+            qr_name = next(iter(backend.queued_resources))
+            backend.force_active(qr_name)
+            scheduler.run_once()
+            backend.write_gcs(f"{job_dir}/failed", "stale old-attempt failure")
+
+            scheduler.run_once()
+            state = json.loads(backend.read_gcs(f"{job_dir}/status.json") or "{}")
+            self.assertEqual(state["status"], JobStatus.RUNNING.value)
+            self.assertEqual(state["current_attempt"], 0)
+
+    def test_focused_user_reconciliation_skips_other_users(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d), quota_total=16)
+            write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-alice", user="alice"),
+            )
+            bob_dir = write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-bob", user="bob"),
+            )
+            backend.write_gcs(f"{bob_dir}/canceled", "cancel")
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once(focus_user="alice")
+
+            alice_state = json.loads(
+                backend.read_gcs(
+                    f"{config.primary_bucket}/jobs/job-alice/status.json"
+                )
+                or "{}"
+            )
+            bob_state = json.loads(backend.read_gcs(f"{bob_dir}/status.json") or "{}")
+            self.assertEqual(alice_state["status"], JobStatus.PROVISIONING.value)
+            self.assertEqual(bob_state["status"], JobStatus.PENDING.value)
+            self.assertEqual(set(scheduler.queued_resources.values()), {"job-alice"})
+
+    def test_focused_user_counts_other_users_active_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d), quota_total=8)
+            write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-alice", user="alice"),
+            )
+            bob_dir = write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-bob", user="bob"),
+            )
+            bob_state = JobState.new()
+            bob_state.status = JobStatus.RUNNING
+            bob_state.current_qr_name = "iqtest-bob-a1"
+            bob_state.current_qr_state = "ACTIVE"
+            backend.write_gcs(f"{bob_dir}/status.json", json.dumps(bob_state.to_dict()))
+
+            scheduler = Scheduler(backend, config)
+            scheduler.run_once(focus_user="alice")
+
+            alice_state = json.loads(
+                backend.read_gcs(
+                    f"{config.primary_bucket}/jobs/job-alice/status.json"
+                )
+                or "{}"
+            )
+            self.assertEqual(alice_state["status"], JobStatus.PENDING.value)
+            self.assertEqual(len(scheduler.queued_resources), 1)
+            self.assertEqual(
+                scheduler.queued_resources["iqtest-bob-a1"],
+                "job-bob",
+            )
 
     def test_focused_reconciliation_skips_unrelated_cancellation(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -426,12 +551,82 @@ class SchedulerTests(unittest.TestCase):
         )
         self.assertIn("/attempts/attempt-$ATTEMPT/claimed", script)
         self.assertIn("/attempts/attempt-$ATTEMPT/heartbeat", script)
+        self.assertIn('"$ATTEMPT_DIR/failed"', script)
+        self.assertIn('"$ATTEMPT_DIR/succeeded"', script)
         self.assertIn("/logs/attempt-$ATTEMPT/worker-$WORKER_ID.log", script)
+        self.assertIn("sha256sum --check", script)
+        self.assertIn('JOB_PHASE="setup"', script)
+        self.assertIn('JOB_PHASE="command"', script)
+        self.assertIn('"failure_type":"%s"', script)
         self.assertIn("log_upload_loop &", script)
         self.assertIn('gsutil -q cp "$LOG_DIR/worker-$WORKER_ID.log"', script)
         self.assertLess(script.index("log_upload_loop &"), script.index('echo "Running setup"'))
         self.assertNotIn(".tpu-jobs", script)
         self.assertNotIn("watch.pid", script)
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=script,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+    def test_status_explains_terminal_error_and_worker_log_command(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            config_path = write_config_file(root)
+            config = load_config(config_path)
+            state_dir = root / "state"
+            backend = DryRunBackend(str(state_dir))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-a"))
+            state = JobState.new()
+            state.status = JobStatus.FAILED
+            state.current_attempt = 1
+            state.attempts.append(
+                AttemptRecord(
+                    attempt=1,
+                    qr_name="iqtest-job-a-a1",
+                    started_at=utc_now(),
+                    ended_at=utc_now(),
+                    error="Worker 3 exited with code 17 during setup",
+                    failure_type="SETUP_ERROR",
+                    retryable=False,
+                    phase="setup",
+                    worker_id=3,
+                    exit_code=17,
+                )
+            )
+            backend.write_gcs(f"{job_dir}/status.json", json.dumps(state.to_dict()))
+
+            args = build_parser().parse_args(
+                [
+                    "--config",
+                    str(config_path),
+                    "--dry-run",
+                    "--base-dir",
+                    str(state_dir),
+                    "status",
+                    "job-a",
+                ]
+            )
+            out = io.StringIO()
+            with redirect_stdout(out):
+                args.func(args)
+            text = out.getvalue()
+            self.assertIn("terminal error; agent diagnosis is required", text)
+            self.assertIn(
+                "tpu logs job-a --attempt 1 --worker 3 --lines 220",
+                text,
+            )
+
+    def test_scheduler_lock_rejects_second_local_scheduler(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            lock_path = Path(d) / "scheduler.lock"
+            with _scheduler_lock(lock_path):
+                with self.assertRaisesRegex(SystemExit, "Another local TPU scheduler"):
+                    with _scheduler_lock(lock_path):
+                        self.fail("second scheduler unexpectedly acquired the lock")
 
     def test_interactive_tpus_are_allowlisted(self) -> None:
         config = make_config(Path("/tmp"))

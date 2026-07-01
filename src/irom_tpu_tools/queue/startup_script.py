@@ -53,13 +53,15 @@ def build_startup_script(
     run_cmd = shlex.quote(spec.command or "true")
 
     return f"""#!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 export HOME="${{HOME:-/root}}"
 JOB_ID={shlex.quote(job_id)}
 JOB_DIR={shlex.quote(job_dir)}
 ATTEMPT={attempt}
 QR_NAME={shlex.quote(qr_name)}
+CODE_CHECKSUM={shlex.quote(spec.code_checksum)}
+ATTEMPT_DIR="$JOB_DIR/attempts/attempt-$ATTEMPT"
 DEPLOY_DIR="$HOME/deployed_code/$JOB_ID/attempt-$ATTEMPT"
 LOG_DIR=/job_logs
 HEARTBEAT_INTERVAL={int(heartbeat_interval)}
@@ -91,10 +93,12 @@ echo "JOB_ID=$JOB_ID"
 echo "QR_NAME=$QR_NAME"
 echo "ATTEMPT=$ATTEMPT"
 echo "WORKER_ID=$WORKER_ID"
+echo "CODE_CHECKSUM=$CODE_CHECKSUM"
 
 RECEIVED_SIGTERM=0
 HEARTBEAT_PID=""
 LOG_UPLOAD_PID=""
+JOB_PHASE="bootstrap"
 
 heartbeat_loop() {{
   while true; do
@@ -136,14 +140,20 @@ cleanup() {{
   echo "JOB_EXIT=$rc"
   echo "JOB_END=$(date -Iseconds)"
   upload_log
-  if [[ "$WORKER_ID" == "0" ]]; then
-    if [[ "$rc" == "0" ]]; then
-      echo "SUCCESS $(date -Iseconds)" | gsutil cp - "$JOB_DIR/succeeded"
-    elif [[ "$rc" == "42" || "$rc" == "143" ]]; then
-      echo "Preemption-like exit $rc; scheduler will retry from QR state"
-    else
-      echo "FAILED with exit code $rc" | gsutil cp - "$JOB_DIR/failed"
+  if [[ "$rc" == "0" ]]; then
+    if [[ "$WORKER_ID" == "0" ]]; then
+      echo "SUCCESS $(date -Iseconds)" | gsutil cp - "$ATTEMPT_DIR/succeeded"
     fi
+  elif [[ "$rc" == "42" || "$rc" == "143" ]]; then
+    echo "Preemption-like exit $rc; scheduler will retry from QR state"
+  else
+    local failure_type="APPLICATION_ERROR"
+    if [[ "$JOB_PHASE" != "command" ]]; then
+      failure_type="SETUP_ERROR"
+    fi
+    printf '{{"failure_type":"%s","phase":"%s","worker_id":"%s","exit_code":%s,"message":"Worker %s exited with code %s during %s"}}\n' \
+      "$failure_type" "$JOB_PHASE" "$WORKER_ID" "$rc" "$WORKER_ID" "$rc" "$JOB_PHASE" \
+      | gsutil cp - "$ATTEMPT_DIR/failed"
   fi
 }}
 trap cleanup EXIT
@@ -156,11 +166,14 @@ LOG_UPLOAD_PID=$!
 
 mkdir -p "$DEPLOY_DIR"
 cd "$DEPLOY_DIR"
+JOB_PHASE="download"
 echo "Downloading code archive"
 gsutil cp {shlex.quote(spec.code_tar_url)} code.tar.gz
+printf '%s  code.tar.gz\n' "$CODE_CHECKSUM" | sha256sum --check -
 tar -xzf code.tar.gz
 rm -f code.tar.gz
 
+JOB_PHASE="setup"
 echo "Running setup"
 SETUP_CMD={setup_cmd}
 bash -lc "$SETUP_CMD"
@@ -171,6 +184,7 @@ if [[ "$WORKER_ID" == "0" ]]; then
   HEARTBEAT_PID=$!
 fi
 
+JOB_PHASE="command"
 echo "Running command"
 RUN_CMD={run_cmd}
 {worker_gate_start}bash -lc "$RUN_CMD"{worker_gate_end}

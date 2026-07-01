@@ -28,6 +28,12 @@ class JobStatus(Enum):
     CANCELED = "CANCELED"
 
 
+class AttemptFailureType(str, Enum):
+    INFRASTRUCTURE_PREEMPTION = "INFRASTRUCTURE_PREEMPTION"
+    SETUP_ERROR = "SETUP_ERROR"
+    APPLICATION_ERROR = "APPLICATION_ERROR"
+
+
 TERMINAL_STATUSES = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELED}
 
 
@@ -185,6 +191,11 @@ class AttemptRecord:
     started_at: str
     ended_at: str
     error: str | None = None
+    failure_type: str | None = None
+    retryable: bool | None = None
+    phase: str | None = None
+    worker_id: int | None = None
+    exit_code: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -193,6 +204,11 @@ class AttemptRecord:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "error": self.error,
+            "failure_type": self.failure_type,
+            "retryable": self.retryable,
+            "phase": self.phase,
+            "worker_id": self.worker_id,
+            "exit_code": self.exit_code,
         }
 
     @classmethod
@@ -203,6 +219,21 @@ class AttemptRecord:
             started_at=str(data.get("started_at") or ""),
             ended_at=str(data.get("ended_at") or ""),
             error=(None if data.get("error") is None else str(data.get("error"))),
+            failure_type=(
+                None
+                if data.get("failure_type") is None
+                else str(data.get("failure_type"))
+            ),
+            retryable=(
+                None if data.get("retryable") is None else bool(data.get("retryable"))
+            ),
+            phase=(None if data.get("phase") is None else str(data.get("phase"))),
+            worker_id=(
+                None if data.get("worker_id") is None else int(data.get("worker_id"))
+            ),
+            exit_code=(
+                None if data.get("exit_code") is None else int(data.get("exit_code"))
+            ),
         )
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import UTC, datetime
+import fcntl
 import json
 import logging
 import os
@@ -25,6 +27,8 @@ from . import interactive as interactive_tools
 from .packaging import compute_checksum, create_code_tarball, generate_job_id
 from .scheduler import Scheduler
 from .types import (
+    AttemptFailureType,
+    AttemptRecord,
     JobResources,
     JobSpec,
     JobState,
@@ -33,6 +37,41 @@ from .types import (
     TERMINAL_STATUSES,
     utc_now,
 )
+
+
+@contextmanager
+def _scheduler_lock(path: Path):
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.seek(0)
+            owner = handle.read().strip() or "owner unknown"
+            raise SystemExit(f"Another local TPU scheduler is active ({owner})") from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"pid={os.getpid()} started={utc_now()}\n")
+        handle.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _scheduler_lock_path(args: argparse.Namespace) -> Path:
+    configured = getattr(args, "lock_file", None) or os.environ.get(
+        "TPU_SCHEDULER_LOCK_FILE"
+    )
+    if configured:
+        return Path(configured)
+    if getattr(args, "dry_run", False):
+        return Path(args.base_dir or "/tmp/irom_tpu_queue_dry_run") / "scheduler.lock"
+    return Path("~/.cache/irom-tpu-tools/scheduler.lock")
 
 
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
@@ -312,6 +351,27 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _failure_type_for_attempt(attempt: AttemptRecord) -> str | None:
+    if attempt.failure_type:
+        return attempt.failure_type
+    error = (attempt.error or "").upper()
+    infrastructure_tokens = (
+        "PREEMPT",
+        "SUSPEND",
+        "QR DISAPPEARED",
+        "QR_FAILED",
+        "HEARTBEAT_TIMEOUT",
+        "ACTIVE_NO_CLAIM_TIMEOUT",
+        "UNHEALTHY_MAINTENANCE",
+        "TPU_VM_",
+    )
+    if any(token in error for token in infrastructure_tokens):
+        return AttemptFailureType.INFRASTRUCTURE_PREEMPTION.value
+    if attempt.error:
+        return AttemptFailureType.APPLICATION_ERROR.value
+    return None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     config = _load_config(args)
     backend = _backend(args)
@@ -340,9 +400,38 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("Attempts:")
         for attempt in state.attempts:
             suffix = f" error={attempt.error}" if attempt.error else ""
+            failure_type = _failure_type_for_attempt(attempt)
+            details = []
+            if failure_type:
+                details.append(f"type={failure_type}")
+            if attempt.retryable is not None:
+                details.append(f"retryable={'yes' if attempt.retryable else 'no'}")
+            if attempt.phase:
+                details.append(f"phase={attempt.phase}")
+            if attempt.worker_id is not None:
+                details.append(f"worker={attempt.worker_id}")
+            if attempt.exit_code is not None:
+                details.append(f"exit={attempt.exit_code}")
+            if details:
+                suffix += " " + " ".join(details)
             print(
                 f"  {attempt.attempt}: {attempt.qr_name} "
                 f"{attempt.started_at} -> {attempt.ended_at}{suffix}"
+            )
+        latest = state.attempts[-1]
+        latest_type = _failure_type_for_attempt(latest)
+        print()
+        if latest_type == AttemptFailureType.INFRASTRUCTURE_PREEMPTION.value:
+            if state.status == JobStatus.FAILED:
+                print("Recovery:   stopped after reaching the attempt limit")
+            else:
+                print("Recovery:   automatic retry using the same submitted job spec")
+        elif state.status == JobStatus.FAILED and latest_type:
+            worker = f" --worker {latest.worker_id}" if latest.worker_id is not None else ""
+            print("Recovery:   terminal error; agent diagnosis is required before retry")
+            print(
+                f"Inspect:    tpu logs {spec.job_id} --attempt {latest.attempt}"
+                f"{worker} --lines 220"
             )
     return 0
 
@@ -882,20 +971,29 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     scheduler = Scheduler(backend, config)
     if args.focus_job and not args.once:
         raise SystemExit("--focus-job requires --once")
-    if args.once:
-        if isinstance(backend, DryRunBackend):
-            backend.tick()
-        try:
-            scheduler.run_once(focus_job_ref=args.focus_job)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
-        scheduler._maybe_write_scheduler_state(force=True)
-        return 0
-    while True:
-        if isinstance(backend, DryRunBackend):
-            backend.tick()
-        scheduler.run_once()
-        time.sleep(args.scan_interval or config.scheduler.scan_interval)
+    if args.focus_job and args.focus_user:
+        raise SystemExit("--focus-job and --focus-user are mutually exclusive")
+    with _scheduler_lock(_scheduler_lock_path(args)):
+        if args.once:
+            if isinstance(backend, DryRunBackend):
+                backend.tick()
+            try:
+                scheduler.run_once(
+                    focus_job_ref=args.focus_job,
+                    focus_user=args.focus_user,
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            scheduler._maybe_write_scheduler_state(force=True)
+            return 0
+        while True:
+            if isinstance(backend, DryRunBackend):
+                backend.tick()
+            try:
+                scheduler.run_once(focus_user=args.focus_user)
+            except Exception:
+                logging.exception("Scheduler iteration failed")
+            time.sleep(args.scan_interval or config.scheduler.scan_interval)
 
 
 def _interactive_tpu(args: argparse.Namespace):
@@ -1128,7 +1226,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--focus-job",
         help="Reconcile and schedule only one job (requires --once)",
     )
+    scheduler.add_argument(
+        "--focus-user",
+        help="Reconcile and schedule only jobs submitted by this user",
+    )
     scheduler.add_argument("--scan-interval", type=int)
+    scheduler.add_argument(
+        "--lock-file",
+        help="Local singleton lock path (default: ~/.cache/irom-tpu-tools/scheduler.lock)",
+    )
     scheduler.add_argument("--verbose", "-v", action="store_true")
     scheduler.set_defaults(func=cmd_scheduler)
 
