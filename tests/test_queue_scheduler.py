@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from irom_tpu_tools.queue.backend import DryRunBackend, GCPBackend
 from irom_tpu_tools.queue.cli import (
@@ -33,6 +33,7 @@ from irom_tpu_tools.queue.types import (
     UserLimitConfig,
     utc_now,
 )
+from irom_tpu_tools.ssh import SSHOptions, gcloud_tpu_ssh, gcloud_tpu_ssh_stream
 
 
 def make_config(
@@ -143,6 +144,44 @@ interactive_tpus: {}
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_single_worker_ssh_keeps_bash_script_in_one_remote_argument(self) -> None:
+        command = "set -e; printf quoted-ok"
+        expected_remote = "bash -lc 'set -e; printf quoted-ok'"
+
+        with patch("irom_tpu_tools.ssh.run_streaming", return_value=0) as stream:
+            rc = gcloud_tpu_ssh_stream(
+                tpu_name="v4-interactive",
+                project="test-project",
+                zone="us-central2-b",
+                worker="0",
+                command=command,
+                ssh=SSHOptions(forward_agent=False),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(stream.call_args.args[0][-1], expected_remote)
+
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("irom_tpu_tools.ssh.run_with_timeout", return_value=completed) as run:
+            result = gcloud_tpu_ssh(
+                tpu_name="v4-interactive",
+                project="test-project",
+                zone="us-central2-b",
+                worker="0",
+                command=command,
+                ssh=SSHOptions(forward_agent=False),
+            )
+        self.assertIs(result, completed)
+        self.assertEqual(run.call_args.args[2][-1], expected_remote)
+
+        local = subprocess.run(
+            ["bash", "-c", expected_remote],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(local.returncode, 0)
+        self.assertEqual(local.stdout, "quoted-ok")
+
     def test_shell_command_join_preserves_nested_bash_command(self) -> None:
         command = [
             "bash",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 import os
+import shlex
 import signal
 import shutil
 import subprocess
@@ -69,6 +70,17 @@ def run_streaming(argv: Sequence[str]) -> int:
     except KeyboardInterrupt:
         # Propagate a conventional exit code for SIGINT
         return 130
+
+
+def _remote_shell_command(command: str, *, no_shell_rc: bool = False) -> str:
+    shell = ["bash"]
+    if no_shell_rc:
+        shell.extend(["--noprofile", "--norc"])
+    shell.extend(["-lc", command])
+    # OpenSSH flattens all trailing argv entries into one remote command. Keep
+    # the script as one quoted argument to `bash -lc` so shell operators cannot
+    # escape into the outer login shell.
+    return shlex.join(shell)
 
 
 def _terminate_process_group(proc: subprocess.Popen, kill_after_s: int) -> int:
@@ -179,10 +191,7 @@ def gcloud_tpu_ssh(
     if allocate_tty:
         args.extend(["-t", "-t"])  # force TTY allocation
     if command:
-        if no_shell_rc:
-            args += ["bash", "--noprofile", "--norc", "-lc", command]
-        else:
-            args += ["bash", "-lc", command]
+        args.append(_remote_shell_command(command, no_shell_rc=no_shell_rc))
     return run_with_timeout(ssh.total_timeout_s, ssh.kill_after_s, args)
 
 
@@ -245,10 +254,7 @@ def gcloud_tpu_ssh_stream(
     if allocate_tty:
         args.extend(["-t", "-t"])  # force TTY allocation
     if command:
-        if no_shell_rc:
-            args += ["bash", "--noprofile", "--norc", "-lc", command]
-        else:
-            args += ["bash", "-lc", command]
+        args.append(_remote_shell_command(command, no_shell_rc=no_shell_rc))
     if total_timeout_s is not None or should_terminate is not None:
         return run_streaming_monitored(
             args,
