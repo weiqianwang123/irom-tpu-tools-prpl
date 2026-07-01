@@ -152,6 +152,7 @@ class Scheduler:
                 error=error,
             )
         )
+        job.state.current_attempt = attempt
         job.state.status = JobStatus.FAILED if error else JobStatus.SUCCEEDED
         current_qr = job.state.current_qr_name
         resource = self.config.resources.get(job.spec.resources.resource_name)

@@ -216,6 +216,33 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(state["current_attempt"], 1)
             self.assertEqual(len(backend.queued_resources), 1)
 
+    def test_application_retry_advances_to_a_fresh_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-a"))
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once()
+            first_qr = next(iter(backend.queued_resources))
+            backend.force_active(first_qr)
+            scheduler.run_once()
+
+            backend.write_gcs(f"{job_dir}/failed", "FAILED with exit code 1")
+            scheduler.run_once()
+            failed_state = json.loads(backend.read_gcs(f"{job_dir}/status.json") or "{}")
+            self.assertEqual(failed_state["status"], JobStatus.FAILED.value)
+            self.assertEqual(failed_state["current_attempt"], 1)
+            self.assertEqual(failed_state["attempts"][0]["attempt"], 1)
+
+            backend.write_gcs(f"{job_dir}/retry", "retry")
+            scheduler.run_once()
+            retry_state = json.loads(backend.read_gcs(f"{job_dir}/status.json") or "{}")
+            self.assertEqual(retry_state["status"], JobStatus.PROVISIONING.value)
+            self.assertEqual(retry_state["current_attempt"], 1)
+            self.assertNotEqual(retry_state["current_qr_name"], first_qr)
+            self.assertTrue(retry_state["current_qr_name"].endswith("-a2"))
+
     def test_focused_reconciliation_skips_unrelated_cancellation(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             backend = DryRunBackend(d)
