@@ -223,6 +223,59 @@ class SchedulerTests(unittest.TestCase):
         vm_command = run.call_args.args[0]
         self.assertIn("--async", vm_command)
 
+    def test_gcp_create_rejects_timeout_result(self) -> None:
+        backend = GCPBackend()
+        backend._run = Mock(
+            return_value=subprocess.CompletedProcess([], 124, "", "timed out")
+        )
+
+        self.assertFalse(
+            backend.create_queued_resource(
+                name="qr-a",
+                node_id="qr-a",
+                project="project",
+                zone="zone",
+                accelerator_type="v6e-8",
+                runtime_version="v2-alpha-tpuv6e",
+                spot=True,
+                startup_script_path="/tmp/startup.sh",
+                service_account=None,
+            )
+        )
+
+    def test_failed_create_is_backed_off_before_retry(self) -> None:
+        class FailOnceBackend(DryRunBackend):
+            def __init__(self, base_dir: str):
+                super().__init__(base_dir)
+                self.create_calls = 0
+
+            def create_queued_resource(self, **kwargs) -> bool:
+                self.create_calls += 1
+                if self.create_calls == 1:
+                    return False
+                return super().create_queued_resource(**kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = FailOnceBackend(d)
+            config = make_config(Path(d))
+            config.scheduler.create_failure_backoff = 300
+            write_job(backend, config.primary_bucket, make_spec("job-a"))
+            scheduler = Scheduler(backend, config)
+            scheduler.scan_jobs()
+
+            scheduler.schedule_pending_jobs()
+            self.assertEqual(backend.create_calls, 1)
+            self.assertIn("job-a", scheduler._create_retry_not_before)
+
+            scheduler.schedule_pending_jobs()
+            self.assertEqual(backend.create_calls, 1)
+
+            scheduler._create_retry_not_before["job-a"] = 0.0
+            scheduler.schedule_pending_jobs()
+            self.assertEqual(backend.create_calls, 2)
+            self.assertNotIn("job-a", scheduler._create_retry_not_before)
+            self.assertEqual(scheduler.jobs["job-a"].state.status, JobStatus.PROVISIONING)
+
     def test_scans_independent_job_records_concurrently(self) -> None:
         class TrackingBackend(DryRunBackend):
             def __init__(self, base_dir: str):
@@ -539,6 +592,7 @@ class SchedulerTests(unittest.TestCase):
     def test_default_config_has_admin_unlimited(self) -> None:
         config = load_config()
         self.assertIsNone(config.user_limits.max_chips_for("admin"))
+        self.assertEqual(config.scheduler.create_failure_backoff, 300)
 
     def test_startup_script_has_centralized_sentinels_and_no_local_watcher(self) -> None:
         script = build_startup_script(

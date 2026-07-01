@@ -170,11 +170,20 @@ class GCPBackend(Backend):
         if label_workaround:
             cmd.append("--labels=env=prod")
         try:
-            self._run(cmd, timeout=120)
-            return True
+            result = self._run(cmd, timeout=120)
         except subprocess.CalledProcessError as exc:
             logger.error("Failed to create queued resource %s: %s", name, exc.stderr)
             return False
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "no command output"
+            logger.error(
+                "Failed to create queued resource %s (exit %s): %s",
+                name,
+                result.returncode,
+                detail,
+            )
+            return False
+        return True
 
     def get_queued_resource_state(
         self, name: str, project: str, zone: str

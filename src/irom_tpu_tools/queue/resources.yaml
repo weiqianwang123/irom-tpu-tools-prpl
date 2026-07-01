@@ -223,6 +223,7 @@ interactive_tpus:
 
 scheduler:
   scan_interval_seconds: 30
+  create_failure_backoff_seconds: 300
   active_no_claim_timeout_seconds: 1800
   heartbeat_timeout_seconds: 600
   status_write_interval_seconds: 60

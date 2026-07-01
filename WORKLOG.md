@@ -226,3 +226,23 @@ Deployment and live verification:
 - `tpu status` exposed retryability and recovery guidance for the affected
   attempts. No new TPU job spec was submitted during implementation or
   deployment.
+
+### Live Follow-Up: Create Backoff
+
+The first deployed scan exposed a repeated HTTP 429 path while the project was
+at its 512-chip v6e preemptible quota. The job correctly remained `PENDING`, but
+the scheduler attempted another queued-resource create after every full scan.
+
+Changes:
+- Added `scheduler.create_failure_backoff_seconds`, defaulting to 300 seconds,
+  and an in-memory per-job delay after a failed queued-resource create.
+- Fixed `GCPBackend.create_queued_resource` so the synthetic exit code 124
+  returned by a bounded command timeout is treated as failure instead of a
+  successfully provisioned request.
+- Updated personal-service and one-shot guidance so validation uses a separate
+  lock and focused one-shots are never run beside the service.
+
+Validation:
+- `PYTHONPATH=src python3 -m unittest discover -s tests`: 34 passed.
+- `PYTHONPATH=src python3 -m compileall -q src tests`: passed.
+- `uvx ruff check src tests`: passed.

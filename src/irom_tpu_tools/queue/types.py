@@ -82,6 +82,7 @@ class InteractiveTPUConfig:
 @dataclass
 class SchedulerConfig:
     scan_interval: int = 30
+    create_failure_backoff: int = 300
     active_no_claim_timeout: int = 1800
     heartbeat_timeout: int = 600
     status_write_interval: int = 60

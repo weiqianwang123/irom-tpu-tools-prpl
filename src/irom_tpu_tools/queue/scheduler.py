@@ -48,6 +48,7 @@ class Scheduler:
         self.queued_resources: dict[str, str] = {}
         self._last_state_write = 0.0
         self._last_orphan_check = 0.0
+        self._create_retry_not_before: dict[str, float] = {}
 
     def _job_dir(self, job: Job) -> str:
         return job.job_dir
@@ -439,6 +440,8 @@ class Scheduler:
         ]
         pending.sort()
         for _, _, job_id in pending:
+            if self._create_retry_not_before.get(job_id, 0.0) > time.monotonic():
+                continue
             job = self.jobs[job_id]
             resource = self.config.resources.get(job.spec.resources.resource_name)
             if not resource or not resource.enabled:
@@ -454,11 +457,20 @@ class Scheduler:
             ):
                 continue
             if self._create_queued_resource(job_id, resource):
+                self._create_retry_not_before.pop(job_id, None)
                 chips_by_quota[resource.quota_group] = (
                     chips_by_quota.get(resource.quota_group, 0) + resource.chips
                 )
                 chips_by_user[job.spec.submitted_by] = (
                     chips_by_user.get(job.spec.submitted_by, 0) + resource.chips
+                )
+            else:
+                delay = max(0, self.config.scheduler.create_failure_backoff)
+                self._create_retry_not_before[job_id] = time.monotonic() + delay
+                logger.warning(
+                    "Deferring queued-resource create for job %s by %s seconds",
+                    job_id,
+                    delay,
                 )
 
     def _create_queued_resource(self, job_id: str, resource: ResourceConfig) -> bool:

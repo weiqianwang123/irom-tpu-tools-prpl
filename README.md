@@ -188,6 +188,12 @@ other users' statuses for quota accounting but performs lifecycle operations
 only for jobs whose `submitted_by` matches the selected user. It does not run
 global orphan cleanup or terminal-record retention.
 
+Failed queued-resource creates are backed off per job according to
+`scheduler.create_failure_backoff_seconds` (300 seconds by default). This keeps
+quota exhaustion or a transient API failure from producing a create request on
+every scan. A scheduler restart resets this in-memory delay and permits one
+immediate create attempt.
+
 A user service survives terminal closure and starts at login. To keep it alive
 after logout, an administrator can enable systemd user lingering:
 
@@ -201,19 +207,24 @@ disconnected from GCP.
 For local validation without GCP:
 
 ```bash
-tpu --dry-run --base-dir /tmp/irom-tpu-queue scheduler --once
+tpu --dry-run --base-dir /tmp/irom-tpu-queue scheduler --once \
+  --lock-file /tmp/irom-tpu-scheduler-dry-run.lock
 ```
 
-To reconcile one preempted job without waiting on unrelated lifecycle cleanup:
+For intentional administrator diagnosis, stop the personal service before a
+focused one-shot and restart it immediately afterward:
 
 ```bash
+systemctl --user stop irom-tpu-scheduler.service
 tpu scheduler --once --focus-job JOB_ID
+systemctl --user start irom-tpu-scheduler.service
 ```
 
 Focused reconciliation still scans authoritative queue state, but it reconciles
 and schedules only the named job. It skips scheduling, cancellation,
 completion, polling, retention, and orphan cleanup for unrelated jobs; run the
 normal scheduler afterward for full global reconciliation and queue ordering.
+Do not use a one-shot loop for normal monitoring or run it beside the service.
 
 The scheduler loop:
 

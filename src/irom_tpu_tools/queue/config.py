@@ -86,6 +86,9 @@ def parse_config(raw: dict[str, Any]) -> QueueConfig:
     sched_raw = raw.get("scheduler", {})
     scheduler = SchedulerConfig(
         scan_interval=int(sched_raw.get("scan_interval_seconds", 30)),
+        create_failure_backoff=int(
+            sched_raw.get("create_failure_backoff_seconds", 300)
+        ),
         active_no_claim_timeout=int(
             sched_raw.get("active_no_claim_timeout_seconds", 1800)
         ),
