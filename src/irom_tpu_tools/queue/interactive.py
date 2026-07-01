@@ -12,11 +12,13 @@ from .types import InteractiveTPUConfig
 
 def _permission_hint(tpu: InteractiveTPUConfig) -> str:
     return (
-        "\n[hint] Interactive TPU access is connect-only, but gcloud still needs "
-        "read permission on the existing TPU node. Ask an admin to grant "
-        f"`roles/tpu.viewer` on project `{tpu.project}` or a custom role with "
-        f"`tpu.nodes.get` for zone `{tpu.zone}`, plus the required OS Login/IAP "
-        "SSH permissions. No TPU Admin role is required."
+        "\n[hint] Interactive TPU access is connect-only. `roles/tpu.viewer` (or "
+        f"a custom role with `tpu.nodes.get` for zone `{tpu.zone}`) provides read "
+        f"access on project `{tpu.project}`, but the default gcloud SSH path also "
+        "attempts `tpu.nodes.update` when the exact local SSH key is absent from "
+        "project or node metadata. Prefer asking an admin to pre-provision that "
+        "key, plus the required OS Login/IAP permissions; otherwise a narrow role "
+        "must also include `tpu.nodes.update`. No TPU Admin role is required."
     )
 
 

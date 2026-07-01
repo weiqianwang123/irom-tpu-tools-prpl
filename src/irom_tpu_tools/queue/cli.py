@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -153,6 +154,17 @@ def _resource_to_job_resources(resource: ResourceConfig) -> JobResources:
     )
 
 
+def _shell_join_command(parts: list[str], *, default: str | None = None) -> str:
+    command = list(parts or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        if default is not None:
+            return default
+        raise SystemExit("No command provided after --")
+    return shlex.join(command)
+
+
 def cmd_create(args: argparse.Namespace) -> int:
     config = _load_config(args)
     backend = _backend(args)
@@ -166,10 +178,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         print(f"Resource {resource.name} is disabled by config.")
         return 1
 
-    command_parts = list(getattr(args, "command", []) or [])
-    if command_parts and command_parts[0] == "--":
-        command_parts = command_parts[1:]
-    command = " ".join(command_parts) or "true"
+    command = _shell_join_command(getattr(args, "command", []), default="true")
     display_name = args.name or resource.name
     job_id = generate_job_id(display_name)
     bucket = bucket_for_resource(config, resource)
@@ -907,12 +916,7 @@ def _validate_worker(tpu, worker: int | str) -> None:
 
 
 def _command_from_args(parts: list[str]) -> str:
-    command = list(parts or [])
-    if command and command[0] == "--":
-        command = command[1:]
-    if not command:
-        raise SystemExit("No command provided after --")
-    return " ".join(command)
+    return _shell_join_command(parts)
 
 
 def cmd_interactive_list(args: argparse.Namespace) -> int:
@@ -1156,14 +1160,14 @@ def build_parser() -> argparse.ArgumentParser:
     irun = interactive_sub.add_parser("run", help="Run a shell command")
     irun.add_argument("name")
     irun.add_argument("--worker", default="0", help="Worker index or 'all'")
-    irun.add_argument("command", nargs=argparse.REMAINDER)
+    irun.add_argument("command", nargs="+", metavar="COMMAND", help="Command and arguments after --")
     irun.set_defaults(func=cmd_interactive_run)
 
     itmux = interactive_sub.add_parser("tmux", help="Run command in tmux")
     itmux.add_argument("name")
     itmux.add_argument("--session", default="tpu")
     itmux.add_argument("--worker", default="all", help="Worker index or 'all'")
-    itmux.add_argument("command", nargs=argparse.REMAINDER)
+    itmux.add_argument("command", nargs="+", metavar="COMMAND", help="Command and arguments after --")
     itmux.set_defaults(func=cmd_interactive_tmux)
 
     iattach = interactive_sub.add_parser("attach", help="Attach to tmux")

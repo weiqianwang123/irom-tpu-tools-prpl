@@ -113,9 +113,12 @@ tpu interactive info v4-16-interactive
 tpu interactive ssh v4-interactive --worker 0
 tpu interactive ssh v4-16-interactive --worker 0
 tpu interactive run v4-interactive -- hostname
-tpu interactive tmux v4-interactive --session debug -- python scratch.py
-tpu interactive attach v4-interactive --session debug
-tpu interactive output v4-interactive --session debug --lines 200
+tpu interactive run v4-16-interactive --worker all -- hostname
+tpu interactive tmux v4-interactive --session "$USER-debug" -- python scratch.py
+tpu interactive tmux v4-16-interactive --session "$USER-train" --worker all -- \
+  bash -lc 'cd ~/repo && uv run python scripts/train.py --fsdp-devices 4'
+tpu interactive attach v4-interactive --session "$USER-debug"
+tpu interactive output v4-interactive --session "$USER-debug" --lines 200
 tpu interactive put v4-interactive ./local.txt ~/local.txt
 tpu interactive get v4-interactive ~/remote.txt ./remote.txt
 ```
@@ -126,14 +129,28 @@ default includes `v4-16-01-interactive` plus `v4-4-01-interactive` through
 `v4-16-interactive`, `v4-32-interactive`, and `v4-4-interactive-01` through
 `v4-4-interactive-04`.
 
+Put `run` and `tmux` launcher options before the `--` separator; options may
+appear before or after the TPU name. Everything after `--` belongs to the remote
+command, including nested command flags. `tmux` targets all configured workers
+by default, but specifying `--worker all` makes multi-host launches explicit.
+Use a unique session name per run, and add `~/.ssh/google_compute_engine` to
+`ssh-agent` before targeting multiple workers.
+
 Interactive users need read permission on existing TPU nodes plus the
 project/IAP/OS Login permissions required to SSH to the TPU VM and perform
-normal file I/O on it. The simplest TPU permission is `roles/tpu.viewer`, which
-includes `tpu.nodes.get` and `tpu.nodes.list`. A narrower custom role can use
-`tpu.nodes.get` for `ssh`, `run`, `tmux`, `put`, and `get`; add
-`tpu.nodes.list` if the user should run live inventory commands. They do not
-need TPU Admin because `tpu interactive` never creates, deletes, stops, or
-starts TPU resources.
+normal file I/O on it. The simplest read permission is `roles/tpu.viewer`,
+which includes `tpu.nodes.get` and `tpu.nodes.list`. A narrower custom role can
+use `tpu.nodes.get` for connect commands and add `tpu.nodes.list` for live
+inventory.
+
+Read permission alone does not guarantee that the default gcloud SSH path can
+connect for the first time. If the user's exact gcloud SSH public-key entry is
+absent from both project and TPU-node `ssh-keys` metadata, gcloud attempts to
+add it by calling `tpu.nodes.update`. Prefer having an admin pre-provision that
+key so the user remains read-only. If that is not possible, a narrow custom role
+must also include `tpu.nodes.update`. Do not grant users TPU Admin merely for
+interactive access; `tpu interactive` never creates, deletes, stops, or starts
+TPU resources.
 
 ## Scheduler
 
@@ -205,10 +222,13 @@ Normal users need:
 - Read access to their logs/status.
 - For allowlisted shared interactive TPUs: `tpu.nodes.get` on the existing TPU
   nodes, usually via `roles/tpu.viewer`; `tpu.nodes.list` is needed for live
-  inventory/listing. They also need SSH/IAP/OS Login access.
+  inventory/listing. They also need SSH/IAP/OS Login access. An admin should
+  pre-provision the exact gcloud SSH key entry; otherwise the default gcloud
+  connection path additionally needs `tpu.nodes.update` to add it.
 - No TPU Admin role.
 
-Common built-in role grant for an interactive user:
+Common built-in read-role grant for an interactive user after the SSH key is
+pre-provisioned:
 
 ```bash
 gcloud projects add-iam-policy-binding mae-irom-lab-guided-data \
@@ -216,9 +236,11 @@ gcloud projects add-iam-policy-binding mae-irom-lab-guided-data \
   --role=roles/tpu.viewer
 ```
 
-For tighter access, create/bind a custom read-only TPU role with
-`tpu.nodes.get` and optionally `tpu.nodes.list`, then restrict the binding with
-an IAM condition for `us-central2-b` TPU node resource names if desired.
+For tighter read access, create/bind a custom role with `tpu.nodes.get` and
+optionally `tpu.nodes.list`, then restrict the binding with an IAM condition for
+`us-central2-b` TPU node resource names if desired. If key pre-provisioning is
+not available, add `tpu.nodes.update` deliberately instead of granting the
+broader TPU Admin role.
 
 Scheduler/admin identity needs:
 

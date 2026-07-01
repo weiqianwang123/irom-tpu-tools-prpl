@@ -12,7 +12,11 @@ import unittest
 from unittest.mock import Mock
 
 from irom_tpu_tools.queue.backend import DryRunBackend, GCPBackend
-from irom_tpu_tools.queue.cli import build_parser
+from irom_tpu_tools.queue.cli import (
+    _command_from_args,
+    _shell_join_command,
+    build_parser,
+)
 from irom_tpu_tools.queue.config import QueueConfig, load_config
 from irom_tpu_tools.queue.interactive import _permission_hint, resolve_interactive_tpu
 from irom_tpu_tools.queue.scheduler import Scheduler
@@ -139,6 +143,30 @@ interactive_tpus: {}
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_shell_command_join_preserves_nested_bash_command(self) -> None:
+        command = [
+            "bash",
+            "-lc",
+            'set -euo pipefail; printf "%s" "$RUN_NAME"',
+        ]
+
+        expected = "bash -lc 'set -euo pipefail; printf \"%s\" \"$RUN_NAME\"'"
+        self.assertEqual(_shell_join_command(command, default="true"), expected)
+        self.assertEqual(_command_from_args(["--", *command]), expected)
+        self.assertEqual(_shell_join_command([], default="true"), "true")
+
+        failure = _shell_join_command(
+            ["bash", "-lc", "set -euo pipefail; false; echo unreachable"]
+        )
+        result = subprocess.run(
+            ["bash", "-lc", failure],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
     def test_gcp_cleanup_uses_async_force_delete_for_active_resources(self) -> None:
         backend = GCPBackend()
         run = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
@@ -379,8 +407,78 @@ class SchedulerTests(unittest.TestCase):
         hint = _permission_hint(tpu)
         self.assertIn("roles/tpu.viewer", hint)
         self.assertIn("tpu.nodes.get", hint)
+        self.assertIn("tpu.nodes.update", hint)
+        self.assertIn("pre-provision", hint)
+        self.assertIn("exact local SSH key", hint)
         self.assertIn("us-central2-b", hint)
         self.assertIn("No TPU Admin role is required", hint)
+
+    def test_interactive_run_parses_options_after_name(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "interactive",
+                "run",
+                "v4-16-interactive",
+                "--worker",
+                "all",
+                "--",
+                "python",
+                "scratch.py",
+                "--worker",
+                "7",
+            ]
+        )
+
+        self.assertEqual(args.name, "v4-16-interactive")
+        self.assertEqual(args.worker, "all")
+        self.assertEqual(
+            _command_from_args(args.command),
+            "python scratch.py --worker 7",
+        )
+
+    def test_interactive_tmux_parses_options_after_name_and_preserves_quoting(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "interactive",
+                "tmux",
+                "v4-16-interactive",
+                "--session",
+                "alice-train",
+                "--worker",
+                "all",
+                "--",
+                "bash",
+                "-lc",
+                "cd ~/repo && uv run python scripts/train.py --fsdp-devices 4",
+            ]
+        )
+
+        self.assertEqual(args.name, "v4-16-interactive")
+        self.assertEqual(args.session, "alice-train")
+        self.assertEqual(args.worker, "all")
+        self.assertEqual(
+            _command_from_args(args.command),
+            "bash -lc 'cd ~/repo && uv run python scripts/train.py --fsdp-devices 4'",
+        )
+
+    def test_interactive_run_keeps_options_before_name_compatible(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "interactive",
+                "run",
+                "--worker",
+                "all",
+                "v4-16-interactive",
+                "--",
+                "hostname",
+            ]
+        )
+
+        self.assertEqual(args.worker, "all")
+        self.assertEqual(_command_from_args(args.command), "hostname")
 
     def test_default_config_has_v4_interactive_entry(self) -> None:
         config = load_config()
