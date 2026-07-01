@@ -340,7 +340,7 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(state_b["status"], JobStatus.RUNNING.value)
             self.assertIn(qr_by_job["job-b"], backend.queued_resources)
 
-    def test_focused_reconciliation_preserves_pending_job_order(self) -> None:
+    def test_focused_reconciliation_schedules_only_focused_pending_job(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             backend = DryRunBackend(d)
             config = make_config(Path(d), quota_total=8)
@@ -356,8 +356,8 @@ class SchedulerTests(unittest.TestCase):
             state_focus = json.loads(
                 backend.read_gcs(f"{config.primary_bucket}/jobs/job-focus/status.json") or "{}"
             )
-            self.assertEqual(state_older["status"], JobStatus.PROVISIONING.value)
-            self.assertEqual(state_focus["status"], JobStatus.PENDING.value)
+            self.assertEqual(state_older["status"], JobStatus.PENDING.value)
+            self.assertEqual(state_focus["status"], JobStatus.PROVISIONING.value)
 
     def test_requeues_ready_unhealthy_maintenance_tpu(self) -> None:
         with tempfile.TemporaryDirectory() as d:

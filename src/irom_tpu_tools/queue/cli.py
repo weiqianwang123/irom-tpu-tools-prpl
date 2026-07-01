@@ -1126,7 +1126,7 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler.add_argument("--once", action="store_true")
     scheduler.add_argument(
         "--focus-job",
-        help="Reconcile one job first without polling unrelated job lifecycles (requires --once)",
+        help="Reconcile and schedule only one job (requires --once)",
     )
     scheduler.add_argument("--scan-interval", type=int)
     scheduler.add_argument("--verbose", "-v", action="store_true")

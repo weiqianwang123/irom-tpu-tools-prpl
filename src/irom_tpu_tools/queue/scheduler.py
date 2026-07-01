@@ -297,7 +297,7 @@ class Scheduler:
         if self.backend.delete_queued_resource(qr_name, resource.project, resource.zone):
             self.queued_resources.pop(qr_name, None)
 
-    def schedule_pending_jobs(self, *, stop_after_job_id: str | None = None) -> None:
+    def schedule_pending_jobs(self, *, only_job_id: str | None = None) -> None:
         chips_by_quota: dict[str, int] = {}
         chips_by_user: dict[str, int] = {}
         for job in self.jobs.values():
@@ -317,19 +317,16 @@ class Scheduler:
             (job.spec.priority, job.spec.submit_time, job_id)
             for job_id, job in self.jobs.items()
             if job.state.status == JobStatus.PENDING
+            and (only_job_id is None or job_id == only_job_id)
         ]
         pending.sort()
         for _, _, job_id in pending:
             job = self.jobs[job_id]
             resource = self.config.resources.get(job.spec.resources.resource_name)
             if not resource or not resource.enabled:
-                if job_id == stop_after_job_id:
-                    break
                 continue
             quota = self.config.quota_groups[resource.quota_group]
             if chips_by_quota.get(resource.quota_group, 0) + resource.chips > quota.total_chips:
-                if job_id == stop_after_job_id:
-                    break
                 continue
             max_user_chips = self.config.user_limits.max_chips_for(job.spec.submitted_by)
             if (
@@ -337,8 +334,6 @@ class Scheduler:
                 and chips_by_user.get(job.spec.submitted_by, 0) + resource.chips
                 > max_user_chips
             ):
-                if job_id == stop_after_job_id:
-                    break
                 continue
             if self._create_queued_resource(job_id, resource):
                 chips_by_quota[resource.quota_group] = (
@@ -347,8 +342,6 @@ class Scheduler:
                 chips_by_user[job.spec.submitted_by] = (
                     chips_by_user.get(job.spec.submitted_by, 0) + resource.chips
                 )
-            if job_id == stop_after_job_id:
-                break
 
     def _create_queued_resource(self, job_id: str, resource: ResourceConfig) -> bool:
         job = self.jobs[job_id]
@@ -469,7 +462,7 @@ class Scheduler:
         self.poll_queued_resources(job_ids)
         if focus_job_id:
             if self.jobs[focus_job_id].state.status == JobStatus.PENDING:
-                self.schedule_pending_jobs(stop_after_job_id=focus_job_id)
+                self.schedule_pending_jobs(only_job_id=focus_job_id)
         else:
             self.schedule_pending_jobs()
             self.reap_terminal_jobs()

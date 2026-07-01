@@ -172,10 +172,10 @@ To reconcile one preempted job without waiting on unrelated lifecycle cleanup:
 tpu scheduler --once --focus-job JOB_ID
 ```
 
-Focused reconciliation still scans authoritative queue state and schedules any
-older pending jobs ahead of the target. It skips cancellation, completion,
-polling, retention, and orphan cleanup for unrelated jobs; run the normal
-scheduler afterward for full global reconciliation.
+Focused reconciliation still scans authoritative queue state, but it reconciles
+and schedules only the named job. It skips scheduling, cancellation,
+completion, polling, retention, and orphan cleanup for unrelated jobs; run the
+normal scheduler afterward for full global reconciliation and queue ordering.
 
 The scheduler loop:
 

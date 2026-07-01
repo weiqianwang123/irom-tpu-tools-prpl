@@ -1,5 +1,11 @@
 # Worklog
 
+## 2026-06-30 - Exclusive Focused Scheduling
+
+- Changed `tpu scheduler --once --focus-job JOB` to schedule only `JOB` when it is pending. Previously, the focused pass walked and attempted every older pending job before the target, which could create unrelated TPU requests while an operator was monitoring a quota-blocked job.
+- Global unfocused scheduling retains priority and submission-time ordering.
+- Added a regression test that leaves the older job pending and provisions only the focused job.
+
 ## 2026-06-26 - Queued TPU Toolbox Branch
 
 Goal: migrate `irom-tpu-tools` to a queue-backed TPU workflow on branch
