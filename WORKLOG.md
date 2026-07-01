@@ -239,10 +239,13 @@ Changes:
 - Fixed `GCPBackend.create_queued_resource` so the synthetic exit code 124
   returned by a bounded command timeout is treated as failure instead of a
   successfully provisioned request.
+- Limited focused-user quota refreshes to other users' nonterminal jobs.
+  Terminal history is still discovered at cold start but no longer causes a
+  status-object read on every scheduler pass.
 - Updated personal-service and one-shot guidance so validation uses a separate
   lock and focused one-shots are never run beside the service.
 
 Validation:
-- `PYTHONPATH=src python3 -m unittest discover -s tests`: 34 passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests`: 35 passed.
 - `PYTHONPATH=src python3 -m compileall -q src tests`: passed.
 - `uvx ruff check src tests`: passed.

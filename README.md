@@ -184,9 +184,10 @@ tpu scheduler --focus-user="$USER" --scan-interval 30
 
 Only one local scheduler can hold the scheduler lock. Stop legacy per-job
 `scheduler --once` loops before enabling the service. `--focus-user` reads
-other users' statuses for quota accounting but performs lifecycle operations
-only for jobs whose `submitted_by` matches the selected user. It does not run
-global orphan cleanup or terminal-record retention.
+other users' nonterminal statuses for quota accounting but performs lifecycle
+operations only for jobs whose `submitted_by` matches the selected user.
+Terminal history is loaded at cold start but is not refreshed on every scan.
+Focused mode does not run global orphan cleanup or terminal-record retention.
 
 Failed queued-resource creates are backed off per job according to
 `scheduler.create_failure_backoff_seconds` (300 seconds by default). This keeps

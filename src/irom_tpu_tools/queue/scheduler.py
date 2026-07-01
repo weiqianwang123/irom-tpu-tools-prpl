@@ -607,7 +607,12 @@ class Scheduler:
                 for job_id, job in self.jobs.items()
                 if job.spec.submitted_by == focus_user
             }
-            self._refresh_job_states(set(self.jobs) - job_ids)
+            quota_job_ids = {
+                job_id
+                for job_id, job in self.jobs.items()
+                if job_id not in job_ids and job.state.status not in TERMINAL_STATUSES
+            }
+            self._refresh_job_states(quota_job_ids)
         else:
             job_ids = None
         self.check_canceled_jobs(job_ids)

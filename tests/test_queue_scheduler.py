@@ -488,6 +488,54 @@ class SchedulerTests(unittest.TestCase):
                 "job-bob",
             )
 
+    def test_focused_user_does_not_refresh_other_terminal_history(self) -> None:
+        class RecordingBackend(DryRunBackend):
+            def __init__(self, base_dir: str):
+                super().__init__(base_dir)
+                self.read_urls: list[str] = []
+
+            def read_gcs(self, url: str) -> str | None:
+                self.read_urls.append(url)
+                return super().read_gcs(url)
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = RecordingBackend(d)
+            config = make_config(Path(d), quota_total=24)
+            write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-alice", user="alice"),
+            )
+            bob_dir = write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-bob", user="bob"),
+            )
+            charlie_dir = write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-charlie", user="charlie"),
+            )
+            bob_state = JobState.new()
+            bob_state.status = JobStatus.SUCCEEDED
+            backend.write_gcs(f"{bob_dir}/status.json", json.dumps(bob_state.to_dict()))
+            charlie_state = JobState.new()
+            charlie_state.status = JobStatus.RUNNING
+            charlie_state.current_qr_name = "iqtest-charlie-a1"
+            charlie_state.current_qr_state = "ACTIVE"
+            backend.write_gcs(
+                f"{charlie_dir}/status.json",
+                json.dumps(charlie_state.to_dict()),
+            )
+            scheduler = Scheduler(backend, config)
+            scheduler.run_once(focus_user="alice")
+            backend.read_urls.clear()
+
+            scheduler.run_once(focus_user="alice")
+
+            self.assertNotIn(f"{bob_dir}/status.json", backend.read_urls)
+            self.assertIn(f"{charlie_dir}/status.json", backend.read_urls)
+
     def test_focused_reconciliation_skips_unrelated_cancellation(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             backend = DryRunBackend(d)
