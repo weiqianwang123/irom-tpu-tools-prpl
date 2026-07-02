@@ -268,10 +268,23 @@ tpu admin activity v6-32-04-lzha v6-32-06-lzha --worker 0
 tpu admin activity --no-ssh v6-32-04-lzha
 tpu admin cleanup --idle-minutes 30
 tpu admin cleanup --idle-minutes 30 --yes
+tpu admin ssh-keys
+tpu admin ssh-keys --add ah4775=./ah4775.pub
+tpu admin ssh-keys --yes
 ```
 
 Cleanup is dry-run by default. It only targets queue-owned resources whose names
 start with the configured `qr_prefix`.
+
+`tpu admin ssh-keys` keeps interactive TPU SSH keys provisioned. It reads the
+`ssh-keys` metadata of every configured interactive TPU, computes the union of
+user keys across nodes plus any `--add USER=PUBKEY_FILE` entries, and reports
+which nodes are missing which keys. With `--yes` it appends the missing entries;
+it never removes keys, keeps unrecognized entries untouched, and skips nodes it
+cannot describe. Run it with `--yes` whenever an interactive TPU is added to
+`interactive_tpus` or a new user is onboarded. This prevents the first-connect
+failure where gcloud, not finding the user's local key in node metadata, tries
+to add it via `tpu.nodes.update` and fails for viewer-only users.
 
 `tpu admin activity` is read-only. It shows live TPU status, any stale local
 watcher processes, and worker tmux/python commands via SSH when the TPU is
@@ -286,8 +299,9 @@ Normal users need:
 - For allowlisted shared interactive TPUs: `tpu.nodes.get` on the existing TPU
   nodes, usually via `roles/tpu.viewer`; `tpu.nodes.list` is needed for live
   inventory/listing. They also need SSH/IAP/OS Login access. An admin should
-  pre-provision the exact gcloud SSH key entry; otherwise the default gcloud
-  connection path additionally needs `tpu.nodes.update` to add it.
+  pre-provision the exact gcloud SSH key entry with
+  `tpu admin ssh-keys --add USER=PUBKEY_FILE --yes`; otherwise the default
+  gcloud connection path additionally needs `tpu.nodes.update` to add it.
 - No TPU Admin role. Deleting a pending or active job goes through
   `tpu delete`, which only writes a queue sentinel; the scheduler identity
   performs the TPU VM and queued-resource deletion.

@@ -8,6 +8,7 @@ import json
 import logging
 import shutil
 import subprocess
+import tempfile
 from typing import Any
 
 from .types import QRState
@@ -76,6 +77,21 @@ class Backend(ABC):
     def ssh_tpu_vm(
         self, name: str, project: str, zone: str, worker: int, command: str
     ) -> subprocess.CompletedProcess[str]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_tpu_vm_ssh_keys(self, name: str, project: str, zone: str) -> str | None:
+        """Return the node's ssh-keys metadata value.
+
+        Returns "" when the node has no ssh-keys metadata and None when the
+        node could not be read; callers must not treat None as empty.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_tpu_vm_ssh_keys(
+        self, name: str, project: str, zone: str, value: str
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -391,6 +407,62 @@ class GCPBackend(Backend):
         ]
         return self._run(cmd, check=False, timeout=60)
 
+    def get_tpu_vm_ssh_keys(self, name: str, project: str, zone: str) -> str | None:
+        cmd = [
+            "gcloud",
+            "alpha",
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "describe",
+            name,
+            "--project",
+            project,
+            "--zone",
+            zone,
+            "--format",
+            "json(metadata)",
+        ]
+        result = self._run(cmd, check=False, timeout=30)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        metadata = data.get("metadata") or {}
+        return str(metadata.get("ssh-keys") or "")
+
+    def set_tpu_vm_ssh_keys(
+        self, name: str, project: str, zone: str, value: str
+    ) -> bool:
+        with tempfile.NamedTemporaryFile("w", suffix=".ssh-keys", delete=False) as tmp:
+            tmp.write(value)
+            keys_path = tmp.name
+        try:
+            cmd = [
+                "gcloud",
+                "alpha",
+                "compute",
+                "tpus",
+                "tpu-vm",
+                "update",
+                name,
+                "--project",
+                project,
+                "--zone",
+                zone,
+                f"--metadata-from-file=ssh-keys={keys_path}",
+            ]
+            result = self._run(cmd, check=False, timeout=120)
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip() or "no output"
+                logger.error("Failed to update ssh-keys on %s: %s", name, detail)
+                return False
+            return True
+        finally:
+            Path(keys_path).unlink(missing_ok=True)
+
     def read_gcs_result(self, url: str) -> GCSReadResult:
         result = self._run(["gcloud", "storage", "cat", url], check=False, timeout=15)
         if result.returncode == 0:
@@ -471,6 +543,7 @@ class DryRunBackend(Backend):
         self.provision_delay_seconds = provision_delay_seconds
         self.qr_state_path = self.base_dir / "qrs.json"
         self.queued_resources: dict[str, SimulatedQR] = {}
+        self.tpu_ssh_keys: dict[tuple[str, str, str], str] = {}
         self._now: datetime | None = None
         self._load_qrs()
 
@@ -678,6 +751,15 @@ class DryRunBackend(Backend):
             "tmux:\n(none)\nprocesses:\n(none)\nlogs:\n(none)\n",
             "",
         )
+
+    def get_tpu_vm_ssh_keys(self, name: str, project: str, zone: str) -> str | None:
+        return self.tpu_ssh_keys.get((project, zone, name))
+
+    def set_tpu_vm_ssh_keys(
+        self, name: str, project: str, zone: str, value: str
+    ) -> bool:
+        self.tpu_ssh_keys[(project, zone, name)] = value
+        return True
 
     def read_gcs(self, url: str) -> str | None:
         path = self._gcs_path(url)

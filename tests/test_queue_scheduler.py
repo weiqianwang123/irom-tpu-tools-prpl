@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 import io
@@ -1071,6 +1072,133 @@ class SchedulerTests(unittest.TestCase):
             with redirect_stdout(out):
                 args.func(args)
             self.assertEqual(out.getvalue(), "(none)\n")
+
+    def _ssh_keys_config_and_backend(self, d: str) -> tuple[Path, DryRunBackend]:
+        root = Path(d)
+        config_path = root / "resources.yaml"
+        config_path.write_text(
+            """
+quota_groups:
+  v4:
+    total_chips: 8
+resources:
+  v4-8:
+    version: v4
+    accelerator_type: v4-8
+    runtime_version: tpu-ubuntu2204-base
+    zone: us-central2-b
+    project: test-project
+    chips: 8
+    workers: 1
+    spot: true
+    enabled: true
+    quota_group: v4
+buckets:
+  us-east1: gs://test-bucket/queue
+primary_bucket_region: us-east1
+scheduler:
+  qr_prefix: iqtest
+interactive_tpus:
+  v4-4-01-interactive:
+    version: v4
+    zone: us-central2-b
+    project: test-project
+    workers: 1
+  v4-4-02-interactive:
+    version: v4
+    zone: us-central2-b
+    project: test-project
+    workers: 1
+""".lstrip()
+        )
+        backend = DryRunBackend(str(root / "state"))
+        return config_path, backend
+
+    def _run_admin_ssh_keys(
+        self, config_path: Path, backend: DryRunBackend, extra: list[str]
+    ) -> tuple[int, str]:
+        parser = build_parser()
+        args = parser.parse_args(
+            ["--config", str(config_path), "--dry-run", "admin", "ssh-keys", *extra]
+        )
+        out = io.StringIO()
+        with patch("irom_tpu_tools.queue.cli._backend", return_value=backend):
+            with redirect_stdout(out):
+                rc = args.func(args)
+        return rc, out.getvalue()
+
+    def test_admin_ssh_keys_syncs_union_across_interactive_nodes(self) -> None:
+        alice = "alice:ssh-rsa " + base64.b64encode(b"alice-key").decode() + " alice"
+        bob = "bob:ssh-rsa " + base64.b64encode(b"bob-key").decode() + " bob"
+        odd = "not a parseable entry"
+        with tempfile.TemporaryDirectory() as d:
+            config_path, backend = self._ssh_keys_config_and_backend(d)
+            backend.set_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b", f"{alice}\n{bob}"
+            )
+            backend.set_tpu_vm_ssh_keys(
+                "v4-4-02-interactive", "test-project", "us-central2-b", f"{alice}\n{odd}"
+            )
+
+            rc, text = self._run_admin_ssh_keys(config_path, backend, [])
+            self.assertEqual(rc, 0)
+            self.assertIn("MISSING: bob", text)
+            self.assertIn("Dry run only", text)
+            node2 = backend.get_tpu_vm_ssh_keys(
+                "v4-4-02-interactive", "test-project", "us-central2-b"
+            )
+            self.assertNotIn("bob:", node2)
+
+            rc, text = self._run_admin_ssh_keys(config_path, backend, ["--yes"])
+            self.assertEqual(rc, 0)
+            node2 = backend.get_tpu_vm_ssh_keys(
+                "v4-4-02-interactive", "test-project", "us-central2-b"
+            )
+            self.assertEqual(node2.splitlines(), [alice, odd, bob])
+            node1 = backend.get_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b"
+            )
+            self.assertEqual(node1.splitlines(), [alice, bob])
+
+            rc, text = self._run_admin_ssh_keys(config_path, backend, [])
+            self.assertEqual(rc, 0)
+            self.assertIn("already has every known key", text)
+
+    def test_admin_ssh_keys_add_provisions_new_user_everywhere(self) -> None:
+        alice = "alice:ssh-rsa " + base64.b64encode(b"alice-key").decode() + " alice"
+        carol_pub = "ssh-rsa " + base64.b64encode(b"carol-key").decode() + " carol@laptop"
+        with tempfile.TemporaryDirectory() as d:
+            config_path, backend = self._ssh_keys_config_and_backend(d)
+            for node in ("v4-4-01-interactive", "v4-4-02-interactive"):
+                backend.set_tpu_vm_ssh_keys(node, "test-project", "us-central2-b", alice)
+            key_file = Path(d) / "carol.pub"
+            key_file.write_text(carol_pub + "\n")
+
+            rc, _ = self._run_admin_ssh_keys(
+                config_path, backend, ["--add", f"carol={key_file}", "--yes"]
+            )
+            self.assertEqual(rc, 0)
+            for node in ("v4-4-01-interactive", "v4-4-02-interactive"):
+                keys = backend.get_tpu_vm_ssh_keys(node, "test-project", "us-central2-b")
+                self.assertEqual(keys.splitlines(), [alice, f"carol:{carol_pub}"])
+
+    def test_admin_ssh_keys_skips_unreadable_node(self) -> None:
+        alice = "alice:ssh-rsa " + base64.b64encode(b"alice-key").decode() + " alice"
+        with tempfile.TemporaryDirectory() as d:
+            config_path, backend = self._ssh_keys_config_and_backend(d)
+            backend.set_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b", alice
+            )
+            # v4-4-02-interactive has no entry: describe fails -> None.
+
+            rc, text = self._run_admin_ssh_keys(config_path, backend, ["--yes"])
+            self.assertEqual(rc, 1)
+            self.assertIn("UNREADABLE", text)
+            self.assertIsNone(
+                backend.get_tpu_vm_ssh_keys(
+                    "v4-4-02-interactive", "test-project", "us-central2-b"
+                )
+            )
 
     def test_delete_reports_sentinel_write_failure(self) -> None:
         class FailingWriteBackend(DryRunBackend):

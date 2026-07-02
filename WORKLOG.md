@@ -1,5 +1,38 @@
 # Worklog
 
+## 2026-07-02 - Interactive TPU SSH Key Sync Command
+
+Goal: make interactive TPU SSH key provisioning automatic and robust after
+diagnosing ah4775's v4 SSH failure. Audit logs showed gcloud attempting
+`tpu.nodes.update` on `v4-4-02/03/04-interactive` on 2026-06-30 because his
+key was only present on the two nodes his own gcloud had updated in mid-June
+while he still had TPU write permissions; viewer-only users cannot self-add
+keys, so first connections to newer nodes failed. The key was manually copied
+to the remaining nodes on 2026-07-01.
+
+Changes:
+- Added `tpu admin ssh-keys [--version vX] [--add USER=PUBKEY_FILE] [--yes]`.
+  It inventories `ssh-keys` metadata on every configured interactive TPU
+  (user + SHA256 fingerprint), computes the cross-node union plus any `--add`
+  public key files, and reports missing entries per node. `--yes` appends the
+  missing keys via `gcloud alpha compute tpus tpu-vm update
+  --metadata-from-file=ssh-keys=...`. It never removes keys, preserves
+  unrecognized metadata lines without propagating them, and skips (and flags)
+  nodes whose describe fails.
+- Added `get_tpu_vm_ssh_keys`/`set_tpu_vm_ssh_keys` to the GCP and dry-run
+  backends. Reads distinguish "no ssh-keys metadata" from "describe failed" so
+  an unreachable node is never treated as empty and overwritten.
+- Documented the sync command and the onboarding flow in the README admin and
+  IAM sections.
+
+Validation:
+- `PYTHONPATH=src python3 -m unittest discover -s tests`: 44 passed, including
+  new tests for union sync, `--add` onboarding, unrecognized-entry
+  preservation, and the unreadable-node guard.
+- `python3 -m compileall -q src tests` and `uvx ruff check src tests`: passed.
+- Live read-only run against the five real interactive nodes printed matching
+  ah4775/lzha fingerprints everywhere and reported no missing keys.
+
 ## 2026-07-02 - CLI Dedup, Non-Admin Delete Fix, Current-Version README
 
 Goal: remove duplicated CLI surface, fix the bug where non-admin users could

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import fcntl
+import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -980,6 +982,127 @@ def cmd_admin_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ssh_key_identity(line: str) -> tuple[str, str] | None:
+    """Return (user, key_blob) for a metadata ssh-keys line, or None if unparseable."""
+    line = line.strip()
+    if not line or ":" not in line:
+        return None
+    user, rest = line.split(":", 1)
+    parts = rest.strip().split()
+    if len(parts) < 2 or not user.strip():
+        return None
+    return user.strip(), parts[1]
+
+
+def _ssh_key_fingerprint(blob: str) -> str:
+    try:
+        digest = hashlib.sha256(base64.b64decode(blob)).digest()
+    except ValueError:
+        return "(unparseable)"
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+def _added_key_entries(items: list[str] | None) -> dict[tuple[str, str], str]:
+    entries: dict[tuple[str, str], str] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise SystemExit(f"--add must use USER=PUBKEY_FILE format: {item}")
+        user, path = item.split("=", 1)
+        user = user.strip()
+        key_path = Path(path).expanduser()
+        if not user or not key_path.is_file():
+            raise SystemExit(f"--add needs a user and a readable key file: {item}")
+        for line in key_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entry = line if ":" in line.split(None, 1)[0] else f"{user}:{line}"
+            identity = _ssh_key_identity(entry)
+            if identity is None:
+                raise SystemExit(f"Unrecognized public key line in {key_path}: {line[:40]}")
+            entries[identity] = entry
+    return entries
+
+
+def cmd_admin_ssh_keys(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    backend = _backend(args)
+    tpus = [
+        t
+        for t in sorted(config.interactive_tpus.values(), key=lambda x: x.name)
+        if args.version is None or t.version == args.version
+    ]
+    if not tpus:
+        print("No configured interactive TPUs match.")
+        return 1
+
+    union: dict[tuple[str, str], str] = {}
+    node_lines: dict[str, list[str] | None] = {}
+    node_identities: dict[str, set[tuple[str, str]]] = {}
+    for tpu in tpus:
+        raw = backend.get_tpu_vm_ssh_keys(tpu.name, tpu.project, tpu.zone)
+        if raw is None:
+            node_lines[tpu.name] = None
+            continue
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        node_lines[tpu.name] = lines
+        identities: set[tuple[str, str]] = set()
+        for line in lines:
+            identity = _ssh_key_identity(line)
+            if identity is None:
+                # Keep unrecognized entries on their node, never propagate.
+                continue
+            identities.add(identity)
+            union.setdefault(identity, line)
+        node_identities[tpu.name] = identities
+
+    union.update(_added_key_entries(args.add))
+
+    exit_code = 0
+    plans: list[tuple[Any, list[str]]] = []
+    for tpu in tpus:
+        lines = node_lines[tpu.name]
+        print(f"## {tpu.name} ({tpu.zone})")
+        if lines is None:
+            print("  UNREADABLE: describe failed; node skipped")
+            exit_code = 1
+            print()
+            continue
+        for line in lines:
+            identity = _ssh_key_identity(line)
+            if identity:
+                print(f"  {identity[0]}  {_ssh_key_fingerprint(identity[1])}")
+            else:
+                print(f"  unrecognized entry (kept as-is): {line[:40]}")
+        missing = [
+            entry
+            for identity, entry in sorted(union.items())
+            if identity not in node_identities[tpu.name]
+        ]
+        for entry in missing:
+            identity = _ssh_key_identity(entry)
+            assert identity is not None
+            print(f"  MISSING: {identity[0]}  {_ssh_key_fingerprint(identity[1])}")
+        if missing:
+            plans.append((tpu, missing))
+        print()
+
+    if not plans:
+        print("Every interactive TPU already has every known key.")
+        return exit_code
+    if not args.yes:
+        print("Dry run only. Re-run with --yes to append the missing keys.")
+        return exit_code
+    for tpu, missing in plans:
+        merged = "\n".join([*(node_lines[tpu.name] or []), *missing])
+        if backend.set_tpu_vm_ssh_keys(tpu.name, tpu.project, tpu.zone, merged):
+            print(f"Updated {tpu.name}: appended {len(missing)} key(s).")
+        else:
+            print(f"Failed to update {tpu.name}; existing metadata left unchanged.")
+            exit_code = 1
+    return exit_code
+
+
 def cmd_scheduler(args: argparse.Namespace) -> int:
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if args.log_file:
@@ -1369,6 +1492,26 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--idle-minutes", type=int)
     cleanup.add_argument("--yes", action="store_true")
     cleanup.set_defaults(func=cmd_admin_cleanup)
+    ssh_keys = admin_sub.add_parser(
+        "ssh-keys",
+        help="Show and sync SSH keys across interactive TPUs",
+        description=(
+            "Inventory ssh-keys metadata on every configured interactive TPU, "
+            "then append any key present on one node (or supplied via --add) "
+            "to the nodes missing it. Keys are never removed. Run with --yes "
+            "after adding an interactive TPU or onboarding a user, so viewer-"
+            "only users never hit the gcloud tpu.nodes.update key-add path."
+        ),
+    )
+    ssh_keys.add_argument("--version", choices=["v4", "v5", "v6"])
+    ssh_keys.add_argument(
+        "--add",
+        action="append",
+        metavar="USER=PUBKEY_FILE",
+        help="Also provision this user's public key file on every node",
+    )
+    ssh_keys.add_argument("--yes", action="store_true")
+    ssh_keys.set_defaults(func=cmd_admin_ssh_keys)
 
     return parser
 
