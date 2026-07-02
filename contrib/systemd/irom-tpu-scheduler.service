@@ -1,5 +1,5 @@
 [Unit]
-Description=Personal IROM TPU queue scheduler
+Description=Central IROM TPU queue scheduler
 Wants=network-online.target
 After=network-online.target
 
@@ -8,7 +8,7 @@ Type=simple
 Environment=PATH=%h/google-cloud-sdk/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TPU_QUEUE_USER=%u
 WorkingDirectory=%h
-ExecStart=%h/.local/bin/tpu scheduler --focus-user=%u --scan-interval=30 --log-file=%h/.local/state/irom-tpu-tools/scheduler.log
+ExecStart=%h/.local/bin/tpu scheduler --scan-interval=30 --log-file=%h/.local/state/irom-tpu-tools/scheduler.log
 Restart=always
 RestartSec=10
 KillMode=control-group

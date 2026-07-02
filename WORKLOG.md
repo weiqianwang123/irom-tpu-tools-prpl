@@ -1,5 +1,30 @@
 # Worklog
 
+## 2026-07-02 - Central Scheduler Service (Drop --focus-user)
+
+Goal: schedule every user's jobs, not only lzha's. zheng reported that jobs
+submitted today ran before priority-0 jobs from yesterday; the queue showed
+his three v6-64 priority-0 jobs PENDING with 256 v6 chips free while lzha's
+default-priority jobs from today were ACTIVE. Root cause: the deployed
+service ran `--focus-user=lzha`, which never schedules other users' pending
+jobs.
+
+Changes:
+- `contrib/systemd/irom-tpu-scheduler.service` now runs `tpu scheduler`
+  unfocused; the unit is the central scheduler for the whole queue.
+- README reframes `--focus-user` as an optional narrow/debugging mode and
+  warns against running a focused service as the only scheduler, and
+  documents queue ordering: priority ascending (0 highest, default 1), then
+  submit time, with quota/user-cap/backoff skipping and GCP capacity deciding
+  activation order.
+- Updated the irom-tpu-vm-workflow skill (`.claude` and `.codex` copies):
+  SKILL.md now describes the central deployment, current command names, and
+  ordering semantics; `personal_scheduler_preflight.sh` now fails if the
+  service command contains `--focus-user` instead of requiring it.
+
+Validation and deployment recorded after service restart in this entry's
+follow-up notes.
+
 ## 2026-07-02 - Self-Service Interactive SSH Key Requests
 
 Goal: let users provision their own interactive TPU SSH keys without any TPU

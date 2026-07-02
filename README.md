@@ -174,14 +174,11 @@ never creates, deletes, stops, or starts TPU resources.
 
 ## Scheduler
 
-The scheduler must run under an identity with TPU Admin permissions:
-
-```bash
-tpu scheduler --scan-interval 30
-```
-
-For a personal scheduler on a workstation that must not reconcile other users'
-jobs, install the included user service and scope it to the local account:
+The scheduler must run under an identity with TPU Admin permissions. Exactly
+one scheduler serves the whole queue: it schedules every user's pending jobs
+by priority (0 is highest, default 1) then submit time, with quota groups and
+per-user chip limits enforcing fairness. Install it as the included user
+service on the scheduler workstation:
 
 ```bash
 install -Dm644 contrib/systemd/irom-tpu-scheduler.service \
@@ -195,18 +192,21 @@ tail -n 100 "$HOME/.local/state/irom-tpu-tools/scheduler.log"
 The unit runs:
 
 ```bash
-tpu scheduler --focus-user="$USER" --scan-interval 30
+tpu scheduler --scan-interval 30
 ```
 
-Only one local scheduler can hold the scheduler lock. `--focus-user` reads
-other users' nonterminal statuses for quota accounting but performs
-scheduling, completion, and retry operations only for jobs whose
-`submitted_by` matches the selected user. Cancellation sentinels are the
-exception: a focused scheduler honors every user's `tpu delete` request and
-releases the corresponding queued resource and TPU VM, so users never need TPU
-Admin to delete their own pending or active jobs. Terminal history is loaded
-at cold start but is not refreshed on every scan. Focused mode does not run
-global orphan cleanup or terminal-record retention.
+Only one local scheduler can hold the scheduler lock.
+
+`--focus-user=<name>` is an optional narrow mode for debugging or split
+deployments: it performs scheduling, completion, and retry operations only for
+jobs whose `submitted_by` matches the selected user, while reading other
+users' nonterminal statuses for quota accounting. Cancellation sentinels and
+interactive SSH key requests are exceptions: even a focused scheduler serves
+every user's `tpu delete` and `tpu interactive add-key` requests. In focused
+mode, terminal history is loaded at cold start but is not refreshed on every
+scan, and global orphan cleanup and terminal-record retention do not run. Do
+not run a focused service as the only scheduler when multiple users submit
+jobs; their pending jobs would never be scheduled.
 
 Failed queued-resource creates are backed off per job according to
 `scheduler.create_failure_backoff_seconds` (300 seconds by default). This keeps
