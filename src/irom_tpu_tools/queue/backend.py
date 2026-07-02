@@ -15,6 +15,12 @@ from .types import QRState
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class GCSReadResult:
+    content: str | None
+    succeeded: bool
+
+
 class Backend(ABC):
     @abstractmethod
     def create_queued_resource(
@@ -75,6 +81,9 @@ class Backend(ABC):
     @abstractmethod
     def read_gcs(self, url: str) -> str | None:
         raise NotImplementedError
+
+    def read_gcs_result(self, url: str) -> GCSReadResult:
+        return GCSReadResult(content=self.read_gcs(url), succeeded=True)
 
     @abstractmethod
     def write_gcs(self, url: str, content: str) -> bool:
@@ -382,11 +391,18 @@ class GCPBackend(Backend):
         ]
         return self._run(cmd, check=False, timeout=60)
 
-    def read_gcs(self, url: str) -> str | None:
+    def read_gcs_result(self, url: str) -> GCSReadResult:
         result = self._run(["gcloud", "storage", "cat", url], check=False, timeout=15)
-        if result.returncode != 0:
-            return None
-        return result.stdout
+        if result.returncode == 0:
+            return GCSReadResult(content=result.stdout, succeeded=True)
+        detail = f"{result.stderr}\n{result.stdout}".lower()
+        if "matched no objects or files" in detail:
+            return GCSReadResult(content=None, succeeded=True)
+        logger.warning("Failed to read GCS object %s (exit %s)", url, result.returncode)
+        return GCSReadResult(content=None, succeeded=False)
+
+    def read_gcs(self, url: str) -> str | None:
+        return self.read_gcs_result(url).content
 
     def write_gcs(self, url: str, content: str) -> bool:
         result = self._run(

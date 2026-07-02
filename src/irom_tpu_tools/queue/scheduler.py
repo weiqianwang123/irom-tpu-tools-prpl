@@ -363,9 +363,17 @@ class Scheduler:
             if elapsed > self.config.scheduler.active_no_claim_timeout:
                 self._handle_preemption(job_id, qr_name, resource, "ACTIVE_NO_CLAIM_TIMEOUT")
             return
-        heartbeat_text = self.backend.read_gcs(
+        heartbeat_result = self.backend.read_gcs_result(
             f"{job.job_dir}/attempts/attempt-{attempt}/heartbeat"
         )
+        if not heartbeat_result.succeeded:
+            logger.warning(
+                "Skipping heartbeat timeout check for job %s attempt %s after GCS read failure",
+                job_id,
+                attempt,
+            )
+            return
+        heartbeat_text = heartbeat_result.content
         heartbeat_at = _parse_time((heartbeat_text or "").strip())
         if not heartbeat_at:
             heartbeat_at = provisioned_at

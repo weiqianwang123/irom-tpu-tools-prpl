@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
 import io
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from irom_tpu_tools.queue.backend import DryRunBackend, GCPBackend
+from irom_tpu_tools.queue.backend import DryRunBackend, GCPBackend, GCSReadResult
 from irom_tpu_tools.queue.cli import (
     _command_from_args,
     _scheduler_lock,
@@ -243,6 +244,24 @@ class SchedulerTests(unittest.TestCase):
             )
         )
 
+    def test_gcp_read_distinguishes_missing_object_from_probe_failure(self) -> None:
+        backend = GCPBackend()
+        backend._run = Mock(
+            return_value=subprocess.CompletedProcess(
+                [], 1, "", "The following URLs matched no objects or files"
+            )
+        )
+        missing = backend.read_gcs_result("gs://bucket/missing")
+        self.assertTrue(missing.succeeded)
+        self.assertIsNone(missing.content)
+
+        backend._run = Mock(
+            return_value=subprocess.CompletedProcess([], 124, "", "timed out")
+        )
+        failed = backend.read_gcs_result("gs://bucket/heartbeat")
+        self.assertFalse(failed.succeeded)
+        self.assertIsNone(failed.content)
+
     def test_failed_create_is_backed_off_before_retry(self) -> None:
         class FailOnceBackend(DryRunBackend):
             def __init__(self, base_dir: str):
@@ -342,6 +361,68 @@ class SchedulerTests(unittest.TestCase):
             )
             self.assertTrue(state["attempts"][0]["retryable"])
             self.assertEqual(len(backend.queued_resources), 1)
+
+    def test_transient_heartbeat_read_failure_does_not_requeue_live_job(self) -> None:
+        class FailingHeartbeatBackend(DryRunBackend):
+            fail_heartbeat_read = False
+
+            def read_gcs_result(self, url: str) -> GCSReadResult:
+                if self.fail_heartbeat_read and url.endswith("/heartbeat"):
+                    self.fail_heartbeat_read = False
+                    return GCSReadResult(content=None, succeeded=False)
+                return super().read_gcs_result(url)
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = FailingHeartbeatBackend(d)
+            config = make_config(Path(d))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-a"))
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once()
+            qr_name = next(iter(backend.queued_resources))
+            backend.force_active(qr_name)
+            scheduler.run_once()
+            scheduler.jobs["job-a"].state.provisioned_at = (
+                datetime.now(UTC) - timedelta(seconds=120)
+            ).isoformat()
+            backend.write_gcs(f"{job_dir}/attempts/attempt-1/claimed", "claimed")
+            backend.write_gcs(
+                f"{job_dir}/attempts/attempt-1/heartbeat", datetime.now(UTC).isoformat()
+            )
+
+            backend.fail_heartbeat_read = True
+            scheduler.run_once()
+
+            state = scheduler.jobs["job-a"].state
+            self.assertEqual(state.status, JobStatus.RUNNING)
+            self.assertEqual(state.current_attempt, 0)
+            self.assertIn(qr_name, backend.queued_resources)
+
+            scheduler.run_once()
+            self.assertEqual(state.status, JobStatus.RUNNING)
+
+    def test_missing_heartbeat_still_requeues_stale_job(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-a"))
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once()
+            qr_name = next(iter(backend.queued_resources))
+            backend.force_active(qr_name)
+            scheduler.run_once()
+            scheduler.jobs["job-a"].state.provisioned_at = (
+                datetime.now(UTC) - timedelta(seconds=120)
+            ).isoformat()
+            backend.write_gcs(f"{job_dir}/attempts/attempt-1/claimed", "claimed")
+
+            scheduler.run_once()
+
+            state = scheduler.jobs["job-a"].state
+            self.assertEqual(state.status, JobStatus.PROVISIONING)
+            self.assertEqual(state.current_attempt, 1)
+            self.assertEqual(state.attempts[0].error, "HEARTBEAT_TIMEOUT")
 
     def test_application_retry_advances_to_a_fresh_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as d:
