@@ -1,14 +1,11 @@
 # irom-tpu-tools
 
-Queue-backed TPU scheduling for IROM. This branch intentionally removes the
-old local watcher workflow from the default CLI. Normal users submit jobs to a
-central GCS queue; a central scheduler service account creates/deletes queued
-resources and TPU VMs.
+Queue-backed TPU scheduling for IROM. Normal users submit jobs to a central
+GCS queue; a scheduler identity creates/deletes queued resources and TPU VMs.
 
-## Why This Branch Exists
+## How It Works
 
-The old workflow let every user run TPU Admin operations from their own shell.
-That made IAM broad and cleanup decentralized. The new split is:
+The tool splits responsibilities across three roles:
 
 - Users: package code, submit job specs, read status/logs, request cancel/retry.
 - Scheduler: creates queued resources, handles preemption, retries attempts,
@@ -16,7 +13,7 @@ That made IAM broad and cleanup decentralized. The new split is:
 - Admins: inspect quotas, all jobs, queue-owned QRs, and delete orphan/idle
   queue resources.
 
-Normal job lifecycle state no longer lives in `~/.tpu-jobs`. It lives in GCS:
+Job lifecycle state lives in GCS:
 
 ```text
 gs://.../tpu-job-queue/
@@ -53,6 +50,8 @@ The packaged default config is
 `src/irom_tpu_tools/queue/resources.yaml`.
 
 ## User Commands
+
+Each action has exactly one command name; there are no alias subcommands.
 
 Submit a job:
 
@@ -98,8 +97,11 @@ tpu retry <job_id_or_name>
 tpu rerun <job_id_or_name>
 ```
 
-`tpu delete` writes a cancellation sentinel. The scheduler performs the actual
-TPU VM and queued-resource cleanup.
+`tpu delete` writes a cancellation sentinel; it works for any user on their
+pending or active jobs and does not require TPU Admin. The scheduler performs
+the actual TPU VM and queued-resource cleanup, including when it runs in
+focused (`--focus-user`) mode for another account. If the sentinel write fails,
+the command reports the error instead of claiming success.
 
 ## Shared Interactive TPUs
 
@@ -123,6 +125,7 @@ tpu interactive tmux v4-16-interactive --session "$USER-train" --worker all -- \
   bash -lc 'cd ~/repo && uv run python scripts/train.py --fsdp-devices 4'
 tpu interactive attach v4-interactive --session "$USER-debug"
 tpu interactive output v4-interactive --session "$USER-debug" --lines 200
+tpu interactive output v4-interactive --session "$USER-debug" --follow
 tpu interactive put v4-interactive ./local.txt ~/local.txt
 tpu interactive get v4-interactive ~/remote.txt ./remote.txt
 ```
@@ -182,12 +185,15 @@ The unit runs:
 tpu scheduler --focus-user="$USER" --scan-interval 30
 ```
 
-Only one local scheduler can hold the scheduler lock. Stop legacy per-job
-`scheduler --once` loops before enabling the service. `--focus-user` reads
-other users' nonterminal statuses for quota accounting but performs lifecycle
-operations only for jobs whose `submitted_by` matches the selected user.
-Terminal history is loaded at cold start but is not refreshed on every scan.
-Focused mode does not run global orphan cleanup or terminal-record retention.
+Only one local scheduler can hold the scheduler lock. `--focus-user` reads
+other users' nonterminal statuses for quota accounting but performs
+scheduling, completion, and retry operations only for jobs whose
+`submitted_by` matches the selected user. Cancellation sentinels are the
+exception: a focused scheduler honors every user's `tpu delete` request and
+releases the corresponding queued resource and TPU VM, so users never need TPU
+Admin to delete their own pending or active jobs. Terminal history is loaded
+at cold start but is not refreshed on every scan. Focused mode does not run
+global orphan cleanup or terminal-record retention.
 
 Failed queued-resource creates are backed off per job according to
 `scheduler.create_failure_backoff_seconds` (300 seconds by default). This keeps
@@ -242,7 +248,7 @@ The packaged config sets `admin: null` under `user_limits.users`, which means
 jobs submitted as user `admin` are not capped by the per-user chip limit. Global
 quota-group limits still apply.
 
-New attempt records distinguish `INFRASTRUCTURE_PREEMPTION`, `SETUP_ERROR`, and
+Attempt records distinguish `INFRASTRUCTURE_PREEMPTION`, `SETUP_ERROR`, and
 `APPLICATION_ERROR`. Infrastructure failures are retried automatically from the
 same immutable job spec. Setup and application errors are terminal: run
 `tpu status JOB`, inspect the indicated worker logs, and diagnose the code,
@@ -267,10 +273,9 @@ tpu admin cleanup --idle-minutes 30 --yes
 Cleanup is dry-run by default. It only targets queue-owned resources whose names
 start with the configured `qr_prefix`.
 
-`tpu admin activity` is read-only. It shows live TPU status, matching old local
-`tpu watch` processes, and worker tmux/python commands via SSH when the TPU is
-reachable. Stop old `tpu watch` processes before deleting resources they own;
-otherwise the old watcher may recreate the TPU or queued resource.
+`tpu admin activity` is read-only. It shows live TPU status, any stale local
+watcher processes, and worker tmux/python commands via SSH when the TPU is
+reachable.
 
 ## IAM Model
 
@@ -283,7 +288,9 @@ Normal users need:
   inventory/listing. They also need SSH/IAP/OS Login access. An admin should
   pre-provision the exact gcloud SSH key entry; otherwise the default gcloud
   connection path additionally needs `tpu.nodes.update` to add it.
-- No TPU Admin role.
+- No TPU Admin role. Deleting a pending or active job goes through
+  `tpu delete`, which only writes a queue sentinel; the scheduler identity
+  performs the TPU VM and queued-resource deletion.
 
 Common built-in read-role grant for an interactive user after the SSH key is
 pre-provisioned:

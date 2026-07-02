@@ -609,6 +609,7 @@ class Scheduler:
         focus_job_id = self._resolve_job_id(focus_job_ref) if focus_job_ref else None
         if focus_job_id:
             job_ids = {focus_job_id}
+            cancel_job_ids = job_ids
         elif focus_user:
             job_ids = {
                 job_id
@@ -621,9 +622,14 @@ class Scheduler:
                 if job_id not in job_ids and job.state.status not in TERMINAL_STATUSES
             }
             self._refresh_job_states(quota_job_ids)
+            # Cancellation only releases resources, so honor every user's
+            # sentinel even when lifecycle work is otherwise focus-restricted.
+            # Otherwise non-focus users can never delete pending/active jobs.
+            cancel_job_ids = job_ids | quota_job_ids
         else:
             job_ids = None
-        self.check_canceled_jobs(job_ids)
+            cancel_job_ids = None
+        self.check_canceled_jobs(cancel_job_ids)
         self.poll_queued_resources(job_ids)
         self.check_completed_jobs(job_ids)
         self.check_retry_requests(job_ids)

@@ -503,7 +503,36 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(state["status"], JobStatus.RUNNING.value)
             self.assertEqual(state["current_attempt"], 0)
 
-    def test_focused_user_reconciliation_skips_other_users(self) -> None:
+    def test_focused_user_reconciliation_skips_other_users_scheduling(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d), quota_total=16)
+            write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-alice", user="alice"),
+            )
+            bob_dir = write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-bob", user="bob"),
+            )
+            scheduler = Scheduler(backend, config)
+
+            scheduler.run_once(focus_user="alice")
+
+            alice_state = json.loads(
+                backend.read_gcs(
+                    f"{config.primary_bucket}/jobs/job-alice/status.json"
+                )
+                or "{}"
+            )
+            bob_state = json.loads(backend.read_gcs(f"{bob_dir}/status.json") or "{}")
+            self.assertEqual(alice_state["status"], JobStatus.PROVISIONING.value)
+            self.assertEqual(bob_state["status"], JobStatus.PENDING.value)
+            self.assertEqual(set(scheduler.queued_resources.values()), {"job-alice"})
+
+    def test_focused_user_still_honors_other_users_cancellation(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             backend = DryRunBackend(d)
             config = make_config(Path(d), quota_total=16)
@@ -522,16 +551,33 @@ class SchedulerTests(unittest.TestCase):
 
             scheduler.run_once(focus_user="alice")
 
-            alice_state = json.loads(
-                backend.read_gcs(
-                    f"{config.primary_bucket}/jobs/job-alice/status.json"
-                )
-                or "{}"
-            )
             bob_state = json.loads(backend.read_gcs(f"{bob_dir}/status.json") or "{}")
-            self.assertEqual(alice_state["status"], JobStatus.PROVISIONING.value)
-            self.assertEqual(bob_state["status"], JobStatus.PENDING.value)
+            self.assertEqual(bob_state["status"], JobStatus.CANCELED.value)
             self.assertEqual(set(scheduler.queued_resources.values()), {"job-alice"})
+
+    def test_focused_user_cancels_other_users_active_tpu(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d), quota_total=16)
+            write_job(
+                backend,
+                config.primary_bucket,
+                make_spec("job-bob", user="bob"),
+            )
+            scheduler = Scheduler(backend, config)
+            scheduler.run_once(focus_user="bob")
+            qr_name = next(iter(scheduler.queued_resources))
+            backend.force_active(qr_name)
+            scheduler.run_once(focus_user="bob")
+
+            bob_dir = f"{config.primary_bucket}/jobs/job-bob"
+            backend.write_gcs(f"{bob_dir}/canceled", "cancel")
+            focused = Scheduler(backend, config)
+            focused.run_once(focus_user="alice")
+
+            bob_state = json.loads(backend.read_gcs(f"{bob_dir}/status.json") or "{}")
+            self.assertEqual(bob_state["status"], JobStatus.CANCELED.value)
+            self.assertNotIn(qr_name, backend.queued_resources)
 
     def test_focused_user_counts_other_users_active_quota(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -1025,6 +1071,48 @@ class SchedulerTests(unittest.TestCase):
             with redirect_stdout(out):
                 args.func(args)
             self.assertEqual(out.getvalue(), "(none)\n")
+
+    def test_delete_reports_sentinel_write_failure(self) -> None:
+        class FailingWriteBackend(DryRunBackend):
+            def write_gcs(self, url: str, content: str) -> bool:
+                if url.endswith("/canceled"):
+                    return False
+                return super().write_gcs(url, content)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            config_path = write_config_file(root)
+            state_dir = root / "state"
+            backend = FailingWriteBackend(str(state_dir))
+            config = load_config(str(config_path))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-del"))
+
+            parser = build_parser()
+            args = parser.parse_args(
+                [
+                    "--config",
+                    str(config_path),
+                    "--dry-run",
+                    "--base-dir",
+                    str(state_dir),
+                    "delete",
+                    "job-del",
+                ]
+            )
+            out = io.StringIO()
+            with patch("irom_tpu_tools.queue.cli._backend", return_value=backend):
+                with redirect_stdout(out):
+                    rc = args.func(args)
+            self.assertEqual(rc, 1)
+            self.assertIn("Failed to write cancellation sentinel", out.getvalue())
+
+            DryRunBackend.write_gcs(backend, f"{job_dir}/canceled", "cancel")
+            out = io.StringIO()
+            with patch("irom_tpu_tools.queue.cli._backend", return_value=backend):
+                with redirect_stdout(out):
+                    rc = args.func(args)
+            self.assertEqual(rc, 0)
+            self.assertIn("Cancellation already requested", out.getvalue())
 
     def test_list_live_shows_active_tpu_vms(self) -> None:
         with tempfile.TemporaryDirectory() as d:

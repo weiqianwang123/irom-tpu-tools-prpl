@@ -500,7 +500,15 @@ def cmd_delete(args: argparse.Namespace) -> int:
     if state.status in TERMINAL_STATUSES:
         print(f"Job is already terminal: {state.status.value}")
         return 0
-    backend.write_gcs(f"{job_dir}/canceled", f"Canceled at {utc_now()}\n")
+    marker = f"{job_dir}/canceled"
+    if backend.exists_gcs(marker):
+        print(f"Cancellation already requested for {spec.job_id}.")
+        print("The scheduler will delete the queued resource and TPU VM.")
+        return 0
+    if not backend.write_gcs(marker, f"Canceled at {utc_now()}\n"):
+        print(f"Failed to write cancellation sentinel: {marker}")
+        print("Check GCS write access to the job directory and retry.")
+        return 1
     print(f"Cancellation requested for {spec.job_id}.")
     print("The scheduler will delete the queued resource and TPU VM.")
     return 0
@@ -1202,10 +1210,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_p.add_argument("--status")
     list_p.set_defaults(func=cmd_list)
 
-    for name in ("status", "info"):
-        p = sub.add_parser(name, help="Show job status")
-        p.add_argument("job")
-        p.set_defaults(func=cmd_status)
+    status = sub.add_parser("status", help="Show job status")
+    status.add_argument("job")
+    status.set_defaults(func=cmd_status)
 
     logs = sub.add_parser("logs", help="Show uploaded job logs")
     logs.add_argument("job")
@@ -1213,13 +1220,6 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--worker", "-w", type=int)
     logs.add_argument("--lines", "-n", type=int, default=200)
     logs.set_defaults(func=cmd_logs)
-
-    output = sub.add_parser("output", help="Alias for logs")
-    output.add_argument("job")
-    output.add_argument("--attempt", "-a", type=int)
-    output.add_argument("--worker", "-w", type=int)
-    output.add_argument("--lines", "-n", type=int, default=200)
-    output.set_defaults(func=cmd_logs)
 
     tail = sub.add_parser("tail", help="Poll uploaded logs")
     tail.add_argument("job")
@@ -1229,10 +1229,9 @@ def build_parser() -> argparse.ArgumentParser:
     tail.add_argument("--interval", type=float, default=5.0)
     tail.set_defaults(func=cmd_tail)
 
-    for name in ("delete", "cancel"):
-        p = sub.add_parser(name, help="Request job cancellation")
-        p.add_argument("job")
-        p.set_defaults(func=cmd_delete)
+    delete = sub.add_parser("delete", help="Request job cancellation")
+    delete.add_argument("job")
+    delete.set_defaults(func=cmd_delete)
 
     retry = sub.add_parser("retry", help="Retry a failed job")
     retry.add_argument("job")
@@ -1311,14 +1310,13 @@ def build_parser() -> argparse.ArgumentParser:
     iattach.add_argument("--worker", type=int, default=0)
     iattach.set_defaults(func=cmd_interactive_attach)
 
-    for command_name in ("output", "tail"):
-        iout = interactive_sub.add_parser(command_name, help="Read latest tmux log")
-        iout.add_argument("name")
-        iout.add_argument("--session", default="tpu")
-        iout.add_argument("--worker", type=int, default=0)
-        iout.add_argument("--lines", "-n", type=int, default=200)
-        iout.add_argument("--follow", "-f", action="store_true")
-        iout.set_defaults(func=cmd_interactive_output)
+    iout = interactive_sub.add_parser("output", help="Read latest tmux log")
+    iout.add_argument("name")
+    iout.add_argument("--session", default="tpu")
+    iout.add_argument("--worker", type=int, default=0)
+    iout.add_argument("--lines", "-n", type=int, default=200)
+    iout.add_argument("--follow", "-f", action="store_true")
+    iout.set_defaults(func=cmd_interactive_output)
 
     ils = interactive_sub.add_parser("tmux-ls", help="List tmux sessions")
     ils.add_argument("name")

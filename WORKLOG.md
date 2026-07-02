@@ -1,5 +1,39 @@
 # Worklog
 
+## 2026-07-02 - CLI Dedup, Non-Admin Delete Fix, Current-Version README
+
+Goal: remove duplicated CLI surface, fix the bug where non-admin users could
+not delete pending/active TPU jobs under the deployed focused scheduler, and
+rewrite the README to describe only the current queue-backed tool.
+
+Changes:
+- Removed alias subcommands so each action has one name: `info` (use
+  `status`), `output` (use `logs`), `cancel` (use `delete`), and
+  `tpu interactive tail` (use `tpu interactive output`, which already supports
+  `--follow`).
+- Deleted the dead legacy watcher modules `tpu.py`, `watch.py`, `jobs.py`, and
+  top-level `config.py`. They were unreachable from the `tpu` entry point and
+  duplicated queue functionality. `ssh.py` remains; `queue/interactive.py`
+  uses it.
+- Fixed focused (`--focus-user`) scheduling to honor every user's cancellation
+  sentinel. Previously `run_once` restricted `check_canceled_jobs` to the
+  focus user's jobs, so a non-focus user's `tpu delete` was written but never
+  processed and their pending/active job and TPU resources were never
+  released. Scheduling, completion, retry, and QR polling remain
+  focus-restricted; `--focus-job` one-shots keep their narrow scope.
+- Made `tpu delete` report an existing sentinel and fail loudly when the
+  sentinel write fails instead of always claiming success.
+- Rewrote the README to describe the current version only, without the
+  branch-migration framing or removed alias commands.
+
+Validation:
+- `python3 -m compileall -q src tests`: passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests`: 41 passed.
+- `uvx ruff check src tests`: passed.
+- Dry-run repro: a `--focus-user=lzha` pass now cancels another user's
+  pending job and removes its queued resource; before the fix the job stayed
+  `PENDING` with the sentinel unprocessed.
+
 ## 2026-06-30 - Exclusive Focused Scheduling
 
 - Changed `tpu scheduler --once --focus-job JOB` to schedule only `JOB` when it is pending. Previously, the focused pass walked and attempted every older pending job before the target, which could create unrelated TPU requests while an operator was monitoring a quota-blocked job.
