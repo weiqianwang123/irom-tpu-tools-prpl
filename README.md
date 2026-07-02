@@ -123,6 +123,7 @@ tpu interactive run v4-16-interactive --worker all -- hostname
 tpu interactive tmux v4-interactive --session "$USER-debug" -- python scratch.py
 tpu interactive tmux v4-16-interactive --session "$USER-train" --worker all -- \
   bash -lc 'cd ~/repo && uv run python scripts/train.py --fsdp-devices 4'
+tpu interactive add-key
 tpu interactive attach v4-interactive --session "$USER-debug"
 tpu interactive output v4-interactive --session "$USER-debug" --lines 200
 tpu interactive output v4-interactive --session "$USER-debug" --follow
@@ -153,11 +154,23 @@ inventory.
 Read permission alone does not guarantee that the default gcloud SSH path can
 connect for the first time. If the user's exact gcloud SSH public-key entry is
 absent from both project and TPU-node `ssh-keys` metadata, gcloud attempts to
-add it by calling `tpu.nodes.update`. Prefer having an admin pre-provision that
-key so the user remains read-only. If that is not possible, a narrow custom role
-must also include `tpu.nodes.update`. Do not grant users TPU Admin merely for
-interactive access; `tpu interactive` never creates, deletes, stops, or starts
-TPU resources.
+add it by calling `tpu.nodes.update`, which viewer-only users do not have.
+Provision the key first instead:
+
+- Self-service: run `tpu interactive add-key`. It uploads the local
+  `~/.ssh/google_compute_engine.pub` to
+  `{primary_bucket}/ssh-key-requests/<user>.pub` using only queue-bucket write
+  access. The scheduler appends the key to every configured interactive TPU on
+  its next sync pass (within about 5 minutes) and then deletes the request.
+  The provisioned entry always uses the requesting queue username: an embedded
+  `user:` prefix must match the request filename and the key comment is
+  replaced with that username, so a request cannot install a key under someone
+  else's login. Keys are only appended, never removed, and requests are kept
+  for retry when any node cannot be read or updated.
+- Admin: run `tpu admin ssh-keys --add USER=PUBKEY_FILE --yes` directly.
+
+Do not grant users TPU Admin merely for interactive access; `tpu interactive`
+never creates, deletes, stops, or starts TPU resources.
 
 ## Scheduler
 
@@ -237,12 +250,14 @@ The scheduler loop:
 
 1. Scans regional queue buckets for jobs.
 2. Handles cancel/retry/completion sentinels.
-3. Polls queue-owned QRs.
-4. Requeues preempted, suspended, missing, or unhealthy infrastructure attempts
+3. Provisions pending interactive SSH key requests (every 5 minutes; also in
+   focused mode, like cancellations).
+4. Polls queue-owned QRs.
+5. Requeues preempted, suspended, missing, or unhealthy infrastructure attempts
    until `max_attempts`.
-5. Enforces quota groups and per-user chip limits.
-6. Deletes terminal or orphaned queue-owned resources.
-7. Writes `scheduler_state.json` for fast CLI listing.
+6. Enforces quota groups and per-user chip limits.
+7. Deletes terminal or orphaned queue-owned resources.
+8. Writes `scheduler_state.json` for fast CLI listing.
 
 The packaged config sets `admin: null` under `user_limits.users`, which means
 jobs submitted as user `admin` are not capped by the per-user chip limit. Global

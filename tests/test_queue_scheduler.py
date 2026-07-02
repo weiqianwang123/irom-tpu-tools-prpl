@@ -872,7 +872,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("roles/tpu.viewer", hint)
         self.assertIn("tpu.nodes.get", hint)
         self.assertIn("tpu.nodes.update", hint)
-        self.assertIn("pre-provision", hint)
+        self.assertIn("tpu interactive add-key", hint)
         self.assertIn("exact local SSH key", hint)
         self.assertIn("us-central2-b", hint)
         self.assertIn("No TPU Admin role is required", hint)
@@ -1178,9 +1178,13 @@ interactive_tpus:
                 config_path, backend, ["--add", f"carol={key_file}", "--yes"]
             )
             self.assertEqual(rc, 0)
+            carol_blob = base64.b64encode(b"carol-key").decode()
             for node in ("v4-4-01-interactive", "v4-4-02-interactive"):
                 keys = backend.get_tpu_vm_ssh_keys(node, "test-project", "us-central2-b")
-                self.assertEqual(keys.splitlines(), [alice, f"carol:{carol_pub}"])
+                # The comment is normalized to the username by the guard.
+                self.assertEqual(
+                    keys.splitlines(), [alice, f"carol:ssh-rsa {carol_blob} carol"]
+                )
 
     def test_admin_ssh_keys_skips_unreadable_node(self) -> None:
         alice = "alice:ssh-rsa " + base64.b64encode(b"alice-key").decode() + " alice"
@@ -1199,6 +1203,121 @@ interactive_tpus:
                     "v4-4-02-interactive", "test-project", "us-central2-b"
                 )
             )
+
+    def test_scheduler_provisions_requested_ssh_key(self) -> None:
+        alice = "alice:ssh-rsa " + base64.b64encode(b"alice-key").decode() + " alice"
+        bob_pub = "ssh-rsa " + base64.b64encode(b"bob-key").decode() + " bob@laptop"
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d))
+            backend.set_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b", alice
+            )
+            request_url = f"{config.primary_bucket}/ssh-key-requests/bob.pub"
+            backend.write_gcs(request_url, bob_pub + "\n")
+
+            scheduler = Scheduler(backend, config)
+            scheduler.run_once(focus_user="lzha")
+
+            keys = backend.get_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b"
+            )
+            bob_blob = base64.b64encode(b"bob-key").decode()
+            self.assertEqual(keys.splitlines(), [alice, f"bob:ssh-rsa {bob_blob} bob"])
+            self.assertIsNone(backend.read_gcs(request_url))
+
+            # A second pass after the interval is a no-op.
+            scheduler._last_interactive_key_sync = 0.0
+            scheduler.sync_interactive_ssh_key_requests()
+            keys_again = backend.get_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b"
+            )
+            self.assertEqual(keys_again, keys)
+
+    def test_scheduler_rejects_key_request_with_mismatched_username(self) -> None:
+        alice = "alice:ssh-rsa " + base64.b64encode(b"alice-key").decode() + " alice"
+        smuggled = "lzha:ssh-rsa " + base64.b64encode(b"evil-key").decode() + " lzha"
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d))
+            backend.set_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b", alice
+            )
+            request_url = f"{config.primary_bucket}/ssh-key-requests/mallory.pub"
+            backend.write_gcs(request_url, smuggled + "\n")
+
+            scheduler = Scheduler(backend, config)
+            scheduler.sync_interactive_ssh_key_requests()
+
+            keys = backend.get_tpu_vm_ssh_keys(
+                "v4-4-01-interactive", "test-project", "us-central2-b"
+            )
+            self.assertEqual(keys, alice)
+            self.assertIsNone(backend.read_gcs(request_url))
+
+    def test_scheduler_keeps_key_request_when_node_unreadable(self) -> None:
+        bob_pub = "ssh-rsa " + base64.b64encode(b"bob-key").decode() + " bob"
+        with tempfile.TemporaryDirectory() as d:
+            backend = DryRunBackend(d)
+            config = make_config(Path(d))
+            # No ssh-keys seeded: describe fails -> None -> request must survive.
+            request_url = f"{config.primary_bucket}/ssh-key-requests/bob.pub"
+            backend.write_gcs(request_url, bob_pub + "\n")
+
+            scheduler = Scheduler(backend, config)
+            scheduler.sync_interactive_ssh_key_requests()
+
+            self.assertIsNotNone(backend.read_gcs(request_url))
+            self.assertIsNone(
+                backend.get_tpu_vm_ssh_keys(
+                    "v4-4-01-interactive", "test-project", "us-central2-b"
+                )
+            )
+
+    def test_interactive_add_key_uploads_request(self) -> None:
+        carol_pub = "ssh-rsa " + base64.b64encode(b"carol-key").decode() + " carol@laptop"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            config_path = write_config_file(root)
+            config_path.write_text(
+                config_path.read_text().replace(
+                    "interactive_tpus: {}",
+                    "interactive_tpus:\n"
+                    "  v4-4-01-interactive:\n"
+                    "    version: v4\n"
+                    "    zone: us-central2-b\n"
+                    "    project: test-project\n"
+                    "    workers: 1\n",
+                )
+            )
+            backend = DryRunBackend(str(root / "state"))
+            key_file = root / "carol.pub"
+            key_file.write_text(carol_pub + "\n")
+
+            parser = build_parser()
+            args = parser.parse_args(
+                [
+                    "--config",
+                    str(config_path),
+                    "--dry-run",
+                    "interactive",
+                    "add-key",
+                    "--key-file",
+                    str(key_file),
+                    "--user",
+                    "carol",
+                ]
+            )
+            out = io.StringIO()
+            with patch("irom_tpu_tools.queue.cli._backend", return_value=backend):
+                with redirect_stdout(out):
+                    rc = args.func(args)
+            self.assertEqual(rc, 0)
+            self.assertIn("Requested SSH key provisioning for carol", out.getvalue())
+            request = backend.read_gcs(
+                "gs://test-bucket/queue/ssh-key-requests/carol.pub"
+            )
+            self.assertEqual(request, carol_pub + "\n")
 
     def test_delete_reports_sentinel_write_failure(self) -> None:
         class FailingWriteBackend(DryRunBackend):

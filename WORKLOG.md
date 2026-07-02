@@ -1,5 +1,37 @@
 # Worklog
 
+## 2026-07-02 - Self-Service Interactive SSH Key Requests
+
+Goal: let users provision their own interactive TPU SSH keys without any TPU
+write permission, using the same sentinel pattern as job cancellation.
+
+Changes:
+- Added `tpu interactive add-key [--key-file PATH] [--user NAME]`. It
+  validates the local gcloud public key and uploads it to
+  `{primary_bucket}/ssh-key-requests/<user>.pub`; users only need existing
+  queue-bucket write access.
+- Added a scheduler sync pass (every 300 seconds, cold start included, active
+  in focus-user mode but not focus-job one-shots) that appends requested keys
+  to every configured interactive TPU and deletes the request once the key is
+  present everywhere. Requests survive unreadable or failed nodes for retry.
+- Username-match guard in shared `normalized_key_entry`: the provisioned
+  metadata entry always uses the request filename's username, an embedded
+  `user:` prefix must match it, and the key comment is replaced with that
+  username, so a request cannot install a key under another login. Malformed
+  or mismatched requests are logged and deleted.
+- Moved the ssh-key parsing/fingerprint helpers into `queue/interactive.py`,
+  shared by the scheduler, `tpu admin ssh-keys` (whose `--add` now applies the
+  same normalization), and the new command. The interactive permission hint
+  now points at `tpu interactive add-key`.
+
+Validation:
+- `PYTHONPATH=src python3 -m unittest discover -s tests`: 48 passed, with new
+  tests for request provisioning under focus-user mode, username-mismatch
+  rejection, unreadable-node retention, and the add-key upload.
+- `python3 -m compileall -q src tests` and `uvx ruff check src tests`: passed.
+- Dry-run smoke: `interactive add-key` uploaded the request and a scheduler
+  one-shot kept it alive while node metadata was unreadable, as designed.
+
 ## 2026-07-02 - Interactive TPU SSH Key Sync Command
 
 Goal: make interactive TPU SSH key provisioning automatic and robust after

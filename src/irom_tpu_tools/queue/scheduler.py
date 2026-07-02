@@ -10,6 +10,7 @@ import uuid
 
 from .backend import Backend
 from .config import QueueConfig
+from . import interactive
 from .startup_script import write_startup_script
 from .types import (
     AttemptFailureType,
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 TERMINAL_TPU_VM_STATES = {"PREEMPTED", "TERMINATED", "STOPPED", "DELETED", "FAILED"}
 RETRY_TPU_VM_HEALTH = {"UNHEALTHY_MAINTENANCE"}
 JOB_SCAN_WORKERS = 8
+INTERACTIVE_KEY_SYNC_INTERVAL = 300
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -48,6 +50,7 @@ class Scheduler:
         self.queued_resources: dict[str, str] = {}
         self._last_state_write = 0.0
         self._last_orphan_check = 0.0
+        self._last_interactive_key_sync = 0.0
         self._create_retry_not_before: dict[str, float] = {}
 
     def _job_dir(self, job: Job) -> str:
@@ -546,6 +549,70 @@ class Scheduler:
                 logger.warning("Deleting orphaned queue QR %s", qr_name)
                 self._cleanup_job_resources(qr_name, resource)
 
+    def sync_interactive_ssh_key_requests(self) -> None:
+        """Provision user-requested SSH keys onto all interactive TPUs.
+
+        Users upload their public key to
+        `{primary_bucket}/ssh-key-requests/<user>.pub` via
+        `tpu interactive add-key`; only the scheduler identity has the
+        tpu.nodes.update permission needed to write node metadata. The
+        username embedded in the key entry must match the request filename so
+        a request cannot provision a key under someone else's login. Keys are
+        only appended, never removed. A request is deleted once the key is
+        present on every configured interactive TPU; unreadable or failed
+        nodes keep the request alive for the next sync pass.
+        """
+        if not self.config.interactive_tpus:
+            return
+        prefix = f"{self.config.primary_bucket}/{interactive.SSH_KEY_REQUEST_PREFIX}/"
+        for url in self.backend.list_gcs(prefix):
+            name = url.rstrip("/").rsplit("/", 1)[-1]
+            if not name.endswith(".pub"):
+                continue
+            user = name[: -len(".pub")]
+            content = self.backend.read_gcs(url)
+            if content is None:
+                continue
+            try:
+                entry = interactive.normalized_key_entry(user, content)
+            except ValueError as exc:
+                logger.warning("Rejecting SSH key request %s: %s", name, exc)
+                self.backend.delete_gcs(url)
+                continue
+            identity = interactive.ssh_key_identity(entry)
+            provisioned_everywhere = True
+            for tpu in sorted(
+                self.config.interactive_tpus.values(), key=lambda t: t.name
+            ):
+                raw = self.backend.get_tpu_vm_ssh_keys(tpu.name, tpu.project, tpu.zone)
+                if raw is None:
+                    logger.warning(
+                        "Cannot read ssh-keys on %s; keeping key request for %s",
+                        tpu.name,
+                        user,
+                    )
+                    provisioned_everywhere = False
+                    continue
+                lines = [line.strip() for line in raw.splitlines() if line.strip()]
+                if any(interactive.ssh_key_identity(line) == identity for line in lines):
+                    continue
+                if self.backend.set_tpu_vm_ssh_keys(
+                    tpu.name, tpu.project, tpu.zone, "\n".join([*lines, entry])
+                ):
+                    logger.info("Provisioned SSH key for %s on %s", user, tpu.name)
+                else:
+                    provisioned_everywhere = False
+            if provisioned_everywhere:
+                self.backend.delete_gcs(url)
+                logger.info("Completed SSH key request for %s", user)
+
+    def _maybe_sync_interactive_ssh_keys(self) -> None:
+        now = time.time()
+        if now - self._last_interactive_key_sync < INTERACTIVE_KEY_SYNC_INTERVAL:
+            return
+        self._last_interactive_key_sync = now
+        self.sync_interactive_ssh_key_requests()
+
     def _maybe_reconcile_orphans(self) -> None:
         now = time.time()
         if now - self._last_orphan_check < 300:
@@ -630,6 +697,10 @@ class Scheduler:
             job_ids = None
             cancel_job_ids = None
         self.check_canceled_jobs(cancel_job_ids)
+        if focus_job_id is None:
+            # Like cancellations, key provisioning is a safe user request the
+            # scheduler identity must serve even in focus-user mode.
+            self._maybe_sync_interactive_ssh_keys()
         self.poll_queued_resources(job_ids)
         self.check_completed_jobs(job_ids)
         self.check_retry_requests(job_ids)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -9,6 +12,66 @@ from ..ssh import SSHOptions, gcloud_tpu_ssh_stream, run_streaming
 from .config import QueueConfig
 from .types import InteractiveTPUConfig
 
+SSH_KEY_REQUEST_PREFIX = "ssh-key-requests"
+_SSH_USER_RE = re.compile(r"^[a-z_][a-z0-9._-]{0,31}$")
+
+
+def key_request_url(config: QueueConfig, user: str) -> str:
+    return f"{config.primary_bucket}/{SSH_KEY_REQUEST_PREFIX}/{user}.pub"
+
+
+def ssh_key_identity(line: str) -> tuple[str, str] | None:
+    """Return (user, key_blob) for a metadata ssh-keys line, or None if unparseable."""
+    line = line.strip()
+    if not line or ":" not in line:
+        return None
+    user, rest = line.split(":", 1)
+    parts = rest.strip().split()
+    if len(parts) < 2 or not user.strip():
+        return None
+    return user.strip(), parts[1]
+
+
+def ssh_key_fingerprint(blob: str) -> str:
+    try:
+        digest = hashlib.sha256(base64.b64decode(blob)).digest()
+    except ValueError:
+        return "(unparseable)"
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+def normalized_key_entry(user: str, text: str) -> str:
+    """Validate a public key file's content and return a 'user:type blob user' line.
+
+    Any embedded 'user:' prefix must match `user`, and the key comment is
+    replaced with the username, so a request file cannot smuggle a different
+    login name onto the shared TPUs.
+    """
+    if not _SSH_USER_RE.match(user):
+        raise ValueError(f"invalid username: {user!r}")
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if len(lines) != 1:
+        raise ValueError("key file must contain exactly one public key line")
+    line = lines[0]
+    if ":" in line.split(None, 1)[0]:
+        prefix, line = line.split(":", 1)
+        if prefix.strip() != user:
+            raise ValueError(
+                f"embedded username {prefix.strip()!r} does not match {user!r}"
+            )
+    parts = line.strip().split()
+    if len(parts) < 2 or not parts[0].startswith(("ssh-", "ecdsa-")):
+        raise ValueError("unrecognized public key format")
+    try:
+        base64.b64decode(parts[1], validate=True)
+    except ValueError as exc:
+        raise ValueError("public key blob is not valid base64") from exc
+    return f"{user}:{parts[0]} {parts[1]} {user}"
+
 
 def _permission_hint(tpu: InteractiveTPUConfig) -> str:
     return (
@@ -16,9 +79,11 @@ def _permission_hint(tpu: InteractiveTPUConfig) -> str:
         f"a custom role with `tpu.nodes.get` for zone `{tpu.zone}`) provides read "
         f"access on project `{tpu.project}`, but the default gcloud SSH path also "
         "attempts `tpu.nodes.update` when the exact local SSH key is absent from "
-        "project or node metadata. Prefer asking an admin to pre-provision that "
-        "key, plus the required OS Login/IAP permissions; otherwise a narrow role "
-        "must also include `tpu.nodes.update`. No TPU Admin role is required."
+        "project or node metadata. Run `tpu interactive add-key` to request key "
+        "provisioning through the queue, or ask an admin to run `tpu admin "
+        "ssh-keys`, plus the required OS Login/IAP permissions; otherwise a "
+        "narrow role must also include `tpu.nodes.update`. No TPU Admin role is "
+        "required."
     )
 
 

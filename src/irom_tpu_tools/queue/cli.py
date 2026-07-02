@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import base64
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import fcntl
-import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -982,24 +980,8 @@ def cmd_admin_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
-def _ssh_key_identity(line: str) -> tuple[str, str] | None:
-    """Return (user, key_blob) for a metadata ssh-keys line, or None if unparseable."""
-    line = line.strip()
-    if not line or ":" not in line:
-        return None
-    user, rest = line.split(":", 1)
-    parts = rest.strip().split()
-    if len(parts) < 2 or not user.strip():
-        return None
-    return user.strip(), parts[1]
-
-
-def _ssh_key_fingerprint(blob: str) -> str:
-    try:
-        digest = hashlib.sha256(base64.b64decode(blob)).digest()
-    except ValueError:
-        return "(unparseable)"
-    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+_ssh_key_identity = interactive_tools.ssh_key_identity
+_ssh_key_fingerprint = interactive_tools.ssh_key_fingerprint
 
 
 def _added_key_entries(items: list[str] | None) -> dict[tuple[str, str], str]:
@@ -1012,15 +994,13 @@ def _added_key_entries(items: list[str] | None) -> dict[tuple[str, str], str]:
         key_path = Path(path).expanduser()
         if not user or not key_path.is_file():
             raise SystemExit(f"--add needs a user and a readable key file: {item}")
-        for line in key_path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            entry = line if ":" in line.split(None, 1)[0] else f"{user}:{line}"
-            identity = _ssh_key_identity(entry)
-            if identity is None:
-                raise SystemExit(f"Unrecognized public key line in {key_path}: {line[:40]}")
-            entries[identity] = entry
+        try:
+            entry = interactive_tools.normalized_key_entry(user, key_path.read_text())
+        except ValueError as exc:
+            raise SystemExit(f"Invalid key file {key_path}: {exc}") from exc
+        identity = _ssh_key_identity(entry)
+        assert identity is not None
+        entries[identity] = entry
     return entries
 
 
@@ -1258,6 +1238,40 @@ def cmd_interactive_tmux_ls(args: argparse.Namespace) -> int:
     return interactive_tools.tmux_ls(tpu, worker=args.worker)
 
 
+def cmd_interactive_add_key(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    backend = _backend(args)
+    if not config.interactive_tpus:
+        print("No interactive TPUs are configured.")
+        return 1
+    user = args.user or os.environ.get("TPU_QUEUE_USER") or os.environ.get("USER") or ""
+    key_path = Path(args.key_file or "~/.ssh/google_compute_engine.pub").expanduser()
+    if not key_path.is_file():
+        print(f"Public key file not found: {key_path}")
+        print("gcloud creates it on first TPU SSH use; to create it manually run:")
+        print(f"  ssh-keygen -t rsa -f ~/.ssh/google_compute_engine -C {user or '$USER'} -N ''")
+        return 1
+    content = key_path.read_text()
+    try:
+        entry = interactive_tools.normalized_key_entry(user, content)
+    except ValueError as exc:
+        print(f"Invalid key request: {exc}")
+        return 1
+    url = interactive_tools.key_request_url(config, user)
+    if not backend.write_gcs(url, content):
+        print(f"Failed to upload key request: {url}")
+        print("Check GCS write access to the queue bucket and retry.")
+        return 1
+    identity = _ssh_key_identity(entry)
+    assert identity is not None
+    print(f"Requested SSH key provisioning for {user}.")
+    print(f"  Key:     {_ssh_key_fingerprint(identity[1])}")
+    print(f"  Request: {url}")
+    print("The scheduler appends the key to every interactive TPU within ~5 minutes.")
+    print("Then retry, for example: tpu interactive ssh v4-interactive --worker 0")
+    return 0
+
+
 def cmd_interactive_put(args: argparse.Namespace) -> int:
     tpu = _interactive_tpu(args)
     _validate_worker(tpu, args.worker)
@@ -1440,6 +1454,27 @@ def build_parser() -> argparse.ArgumentParser:
     iout.add_argument("--lines", "-n", type=int, default=200)
     iout.add_argument("--follow", "-f", action="store_true")
     iout.set_defaults(func=cmd_interactive_output)
+
+    iaddkey = interactive_sub.add_parser(
+        "add-key",
+        help="Request SSH key provisioning on all shared TPUs",
+        description=(
+            "Upload your gcloud SSH public key to the queue bucket as a "
+            "provisioning request. The scheduler appends it to every "
+            "configured interactive TPU, so viewer-only SSH works without "
+            "tpu.nodes.update. The key is provisioned under your queue "
+            "username only."
+        ),
+    )
+    iaddkey.add_argument(
+        "--key-file",
+        help="Public key path (default: ~/.ssh/google_compute_engine.pub)",
+    )
+    iaddkey.add_argument(
+        "--user",
+        help="Override the requesting username (default: TPU_QUEUE_USER or USER)",
+    )
+    iaddkey.set_defaults(func=cmd_interactive_add_key)
 
     ils = interactive_sub.add_parser("tmux-ls", help="List tmux sessions")
     ils.add_argument("name")
