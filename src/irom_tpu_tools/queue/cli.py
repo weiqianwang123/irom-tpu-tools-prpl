@@ -943,6 +943,16 @@ def cmd_admin_cleanup(args: argparse.Namespace) -> int:
                 continue
             state = JobState.from_dict(entry["state"])
             if args.idle_minutes is not None:
+                attempt = _latest_attempt(state)
+                claimed = backend.exists_gcs(
+                    f"{entry['job_dir']}/attempts/attempt-{attempt}/claimed"
+                )
+                if not claimed:
+                    # No worker has claimed this attempt: the QR is still
+                    # WAITING_FOR_RESOURCES or provisioning, so a missing
+                    # heartbeat means "not started", not "idle". Reaping it
+                    # cancels a healthy pending job.
+                    continue
                 age = _heartbeat_age_seconds(backend, entry["job_dir"], state)
                 if age is None or age >= args.idle_minutes * 60:
                     actions.append(("idle", qr, resource, entry["job_dir"]))
