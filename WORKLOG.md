@@ -22,8 +22,18 @@ Changes:
   ordering semantics; `personal_scheduler_preflight.sh` now fails if the
   service command contains `--focus-user` instead of requiring it.
 
-Validation and deployment recorded after service restart in this entry's
-follow-up notes.
+Deployment and live verification (2026-07-02):
+- Pushed `597fdb0`, ran `pipx reinstall irom-tpu-tools`, installed the updated
+  unit, `daemon-reload`, restarted `irom-tpu-scheduler.service`. The updated
+  preflight reported `mode=central` with one service PID at `597fdb0`.
+- The first central scan drained the cancellation backlog: eight jobs whose
+  `canceled` sentinels had been written by zheng, yixunhu, and ah4775 while
+  the focused scheduler ignored them (verified `Canceled at ...` sentinel
+  contents and timestamps, all matching deliberate user cancel-and-resubmit
+  patterns) transitioned to CANCELED and released ~192 v6 chips.
+- zheng's priority-0 `train_ac_wan` (20260701-185937) left PENDING and reached
+  PROVISIONING on QR `iq-39b4a5ca-v6-64-a1` within minutes of the restart;
+  remaining pending jobs are being scheduled in priority/submit order.
 
 ## 2026-07-02 - Self-Service Interactive SSH Key Requests
 
