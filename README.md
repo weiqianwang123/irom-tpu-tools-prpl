@@ -27,6 +27,8 @@ gs://.../tpu-job-queue/
     running
     attempts/attempt-1/claimed
     attempts/attempt-1/heartbeat
+    attempts/attempt-1/setup-ready/worker-0
+    attempts/attempt-1/setup-complete
     attempts/attempt-1/succeeded
     attempts/attempt-1/failed
     logs/attempt-1/worker-0.log
@@ -269,6 +271,13 @@ same immutable job spec. Setup and application errors are terminal: run
 `tpu status JOB`, inspect the indicated worker logs, and diagnose the code,
 configuration, data, checkpoint, and metrics before requesting `tpu retry` or
 submitting a corrected job.
+
+For multi-worker jobs, each worker publishes an attempt-scoped setup-ready
+marker and waits for worker 0 to release the setup barrier before entering the
+user command. Worker 0 starts the attempt heartbeat before setup, so a slow
+package manager or dependency install on one host cannot make faster hosts
+enter distributed initialization early. The barrier fails as `SETUP_ERROR`
+after 30 minutes and preserves the first worker failure report.
 
 ## Admin Commands
 

@@ -35,6 +35,7 @@ def build_startup_script(
     attempt: int,
     project: str,
     heartbeat_interval: int = 60,
+    setup_barrier_timeout: int = 1800,
 ) -> str:
     env_vars = {
         "TPU_QUEUE_JOB_ID": job_id,
@@ -51,6 +52,7 @@ def build_startup_script(
 
     setup_cmd = shlex.quote(spec.setup_cmd or "true")
     run_cmd = shlex.quote(spec.command or "true")
+    expected_workers = max(1, spec.resources.workers)
 
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -66,6 +68,9 @@ DEPLOY_DIR="$HOME/deployed_code/$JOB_ID/attempt-$ATTEMPT"
 LOG_DIR=/job_logs
 HEARTBEAT_INTERVAL={int(heartbeat_interval)}
 LOG_UPLOAD_INTERVAL={int(heartbeat_interval)}
+EXPECTED_WORKERS={expected_workers}
+SETUP_BARRIER_TIMEOUT={int(setup_barrier_timeout)}
+SETUP_BARRIER_POLL_INTERVAL=10
 
 get_worker_id() {{
   if [[ -n "${{TPU_WORKER_ID:-}}" ]]; then
@@ -119,6 +124,51 @@ log_upload_loop() {{
   done
 }}
 
+wait_for_setup_barrier() {{
+  local ready_marker="$ATTEMPT_DIR/setup-ready/worker-$WORKER_ID"
+  local complete_marker="$ATTEMPT_DIR/setup-complete"
+  local failed_marker="$ATTEMPT_DIR/failed"
+  local deadline=$((SECONDS + SETUP_BARRIER_TIMEOUT))
+
+  date -Iseconds | gsutil cp - "$ready_marker"
+  echo "Setup complete on worker $WORKER_ID; waiting for $EXPECTED_WORKERS workers"
+
+  if [[ "$WORKER_ID" == "0" ]]; then
+    while (( SECONDS < deadline )); do
+      if gsutil -q stat "$failed_marker"; then
+        echo "Another worker reported a setup failure"
+        return 1
+      fi
+      local ready_listing
+      local ready_count
+      ready_listing="$(gsutil ls "$ATTEMPT_DIR/setup-ready/worker-*" 2>/dev/null || true)"
+      ready_count="$(printf '%s\n' "$ready_listing" | sed '/^$/d' | wc -l)"
+      if (( ready_count >= EXPECTED_WORKERS )); then
+        date -Iseconds | gsutil cp - "$complete_marker"
+        echo "All $EXPECTED_WORKERS workers completed setup"
+        return 0
+      fi
+      echo "Setup barrier progress: $ready_count/$EXPECTED_WORKERS workers"
+      sleep "$SETUP_BARRIER_POLL_INTERVAL"
+    done
+  else
+    while (( SECONDS < deadline )); do
+      if gsutil -q stat "$complete_marker"; then
+        echo "Setup barrier released on worker $WORKER_ID"
+        return 0
+      fi
+      if gsutil -q stat "$failed_marker"; then
+        echo "Another worker reported a setup failure"
+        return 1
+      fi
+      sleep "$SETUP_BARRIER_POLL_INTERVAL"
+    done
+  fi
+
+  echo "Timed out after $SETUP_BARRIER_TIMEOUT seconds waiting for all workers to complete setup"
+  return 1
+}}
+
 handle_sigterm() {{
   echo "Received SIGTERM"
   RECEIVED_SIGTERM=1
@@ -151,9 +201,13 @@ cleanup() {{
     if [[ "$JOB_PHASE" != "command" ]]; then
       failure_type="SETUP_ERROR"
     fi
-    printf '{{"failure_type":"%s","phase":"%s","worker_id":"%s","exit_code":%s,"message":"Worker %s exited with code %s during %s"}}\n' \
-      "$failure_type" "$JOB_PHASE" "$WORKER_ID" "$rc" "$WORKER_ID" "$rc" "$JOB_PHASE" \
-      | gsutil cp - "$ATTEMPT_DIR/failed"
+    if gsutil -q stat "$ATTEMPT_DIR/failed"; then
+      echo "Preserving the first worker failure report"
+    else
+      printf '{{"failure_type":"%s","phase":"%s","worker_id":"%s","exit_code":%s,"message":"Worker %s exited with code %s during %s"}}\n' \
+        "$failure_type" "$JOB_PHASE" "$WORKER_ID" "$rc" "$WORKER_ID" "$rc" "$JOB_PHASE" \
+        | gsutil cp - "$ATTEMPT_DIR/failed"
+    fi
   fi
 }}
 trap cleanup EXIT
@@ -173,15 +227,21 @@ printf '%s  code.tar.gz\n' "$CODE_CHECKSUM" | sha256sum --check -
 tar -xzf code.tar.gz
 rm -f code.tar.gz
 
+if [[ "$WORKER_ID" == "0" ]]; then
+  heartbeat_loop &
+  HEARTBEAT_PID=$!
+fi
+
 JOB_PHASE="setup"
 echo "Running setup"
 SETUP_CMD={setup_cmd}
 bash -lc "$SETUP_CMD"
 
+JOB_PHASE="setup_barrier"
+wait_for_setup_barrier
+
 if [[ "$WORKER_ID" == "0" ]]; then
   date -Iseconds | gsutil cp - "$JOB_DIR/attempts/attempt-$ATTEMPT/claimed"
-  heartbeat_loop &
-  HEARTBEAT_PID=$!
 fi
 
 JOB_PHASE="command"
@@ -201,6 +261,7 @@ def write_startup_script(
     project: str,
     output_path: str,
     heartbeat_interval: int = 60,
+    setup_barrier_timeout: int = 1800,
 ) -> str:
     path = Path(output_path)
     path.write_text(
@@ -212,6 +273,7 @@ def write_startup_script(
             attempt=attempt,
             project=project,
             heartbeat_interval=heartbeat_interval,
+            setup_barrier_timeout=setup_barrier_timeout,
         )
     )
     path.chmod(0o700)

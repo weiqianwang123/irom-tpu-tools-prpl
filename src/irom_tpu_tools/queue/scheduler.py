@@ -519,7 +519,7 @@ class Scheduler:
             return False
         self.backend.write_gcs(
             f"{job.job_dir}/attempts/attempt-{attempt}/startup_version",
-            "2\n",
+            "3\n",
         )
         self.queued_resources[qr_name] = job_id
         job.state.status = JobStatus.PROVISIONING

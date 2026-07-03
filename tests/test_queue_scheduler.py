@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import io
 import json
@@ -806,16 +807,26 @@ class SchedulerTests(unittest.TestCase):
         )
         self.assertIn("/attempts/attempt-$ATTEMPT/claimed", script)
         self.assertIn("/attempts/attempt-$ATTEMPT/heartbeat", script)
+        self.assertIn('"$ATTEMPT_DIR/setup-ready/worker-$WORKER_ID"', script)
+        self.assertIn('"$ATTEMPT_DIR/setup-complete"', script)
         self.assertIn('"$ATTEMPT_DIR/failed"', script)
         self.assertIn('"$ATTEMPT_DIR/succeeded"', script)
         self.assertIn("/logs/attempt-$ATTEMPT/worker-$WORKER_ID.log", script)
         self.assertIn("sha256sum --check", script)
         self.assertIn('JOB_PHASE="setup"', script)
+        self.assertIn('JOB_PHASE="setup_barrier"', script)
         self.assertIn('JOB_PHASE="command"', script)
         self.assertIn('"failure_type":"%s"', script)
         self.assertIn("log_upload_loop &", script)
         self.assertIn('gsutil -q cp "$LOG_DIR/worker-$WORKER_ID.log"', script)
         self.assertLess(script.index("log_upload_loop &"), script.index('echo "Running setup"'))
+        self.assertLess(script.index("heartbeat_loop &"), script.index('echo "Running setup"'))
+        self.assertLess(script.rindex("wait_for_setup_barrier"), script.index('echo "Running command"'))
+        self.assertIn("EXPECTED_WORKERS=1", script)
+        self.assertIn("SETUP_BARRIER_TIMEOUT=1800", script)
+        self.assertIn("Preserving the first worker failure report", script)
+        self.assertLess(script.index("heartbeat_loop &"), script.index('JOB_PHASE="setup"'))
+        self.assertLess(script.index('JOB_PHASE="setup_barrier"'), script.index('JOB_PHASE="command"'))
         self.assertNotIn(".tpu-jobs", script)
         self.assertNotIn("watch.pid", script)
         syntax = subprocess.run(
@@ -826,6 +837,24 @@ class SchedulerTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+    def test_startup_script_uses_resource_worker_count_for_setup_barrier(self) -> None:
+        spec = make_spec("job-a")
+        spec = replace(
+            spec,
+            resources=replace(spec.resources, chips=64, workers=16),
+        )
+        script = build_startup_script(
+            job_id="job-a",
+            spec=spec,
+            qr_name="iqtest-123-v6-64-a1",
+            job_dir="gs://test-bucket/queue/jobs/job-a",
+            attempt=1,
+            project="test-project",
+            setup_barrier_timeout=90,
+        )
+        self.assertIn("EXPECTED_WORKERS=16", script)
+        self.assertIn("SETUP_BARRIER_TIMEOUT=90", script)
 
     def test_status_explains_terminal_error_and_worker_log_command(self) -> None:
         with tempfile.TemporaryDirectory() as d:
