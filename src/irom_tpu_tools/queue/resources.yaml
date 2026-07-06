@@ -166,7 +166,7 @@ resources:
     chips: 128
     workers: 32
     spot: true
-    enabled: false
+    enabled: true
     quota_group: v6
     service_account: tpu-sa-us-east1@mae-irom-lab-guided-data.iam.gserviceaccount.com
 
