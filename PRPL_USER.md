@@ -4,6 +4,60 @@ This guide explains how PRPL lab members can use the shared TPU queue.
 
 Normal users do not need to SSH into the scheduler VM. The scheduler is already running separately and will pick up submitted jobs from the queue buckets.
 
+## Before you start
+
+Before you can submit jobs, you need access to the project and a few tools installed locally. Do these steps once.
+
+### 1. Get access (ask an admin)
+
+Your Google account must be added to the project before any `tpu` command will work. Ask a PRPL TPU admin to:
+
+```text
+add your Google account to the project tpu-tsilver-20260619
+grant your account read/write on the four queue buckets
+```
+
+Give the admin the exact Google account email you will use with `gcloud`. Until this is done, `tpu` commands will fail with a permission (403) error.
+
+### 2. Install the required local tools
+
+You need these on your laptop, workstation, or Cloud Shell:
+
+```text
+Python 3.8 or newer (3.8 to 3.13)
+git
+Google Cloud SDK (the gcloud command)
+```
+
+- Google Cloud SDK install guide: https://cloud.google.com/sdk/docs/install
+  The `tpu` CLI talks to the queue and to TPUs through `gcloud`, so this is required.
+- Python and git are already present on most systems. Check with `python3 --version` and `git --version`.
+- Cloud Shell (https://shell.cloud.google.com) already has gcloud, Python, and git preinstalled, so it is the fastest way to start.
+
+Some commands (`tpu list --live` and `tpu interactive`) use gcloud's alpha TPU commands. If gcloud asks to install the `alpha` component, accept it, or run:
+
+```bash
+gcloud components install alpha
+```
+
+### 3. Sign in to Google Cloud
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project tpu-tsilver-20260619
+```
+
+### 4. Verify your access
+
+Confirm your account can reach a queue bucket before you submit anything:
+
+```bash
+gcloud storage ls gs://prpl-tpu-queue-us-east1-944301850228/
+```
+
+If this succeeds (even if it lists nothing), your access is working. If it fails with a permission error, your account has not been granted bucket access yet. Ask an admin (see step 1).
+
 ## Project
 
 The current Google Cloud project is:
@@ -70,6 +124,8 @@ tpu list --resources v6
 ## Submit a job
 
 From your training repo, submit a job with `tpu create`.
+
+The code directory you pass to `--code-dir` must be a git repository. `tpu create` bundles only the files that git tracks (plus untracked files not ignored by `.gitignore`), so anything ignored by git is not uploaded. You do not need to commit first, but the directory must be a git repo. Keep large datasets and checkpoints out of this directory and in a separate bucket (see below).
 
 Example:
 
