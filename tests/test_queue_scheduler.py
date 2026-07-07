@@ -791,9 +791,12 @@ class SchedulerTests(unittest.TestCase):
             scheduler.run_once()
             self.assertEqual(len(backend.queued_resources), 2)
 
-    def test_default_config_has_admin_unlimited(self) -> None:
+    def test_default_config_has_an_unlimited_user(self) -> None:
         config = load_config()
-        self.assertIsNone(config.user_limits.max_chips_for("admin"))
+        # At least one configured user is exempt from the per-user chip limit
+        # (the admin identity, whatever it is named in this deployment).
+        self.assertIn(None, config.user_limits.users.values())
+        self.assertEqual(config.user_limits.default_max_chips, 192)
         self.assertEqual(config.scheduler.create_failure_backoff, 300)
 
     def test_startup_script_has_centralized_sentinels_and_no_local_watcher(self) -> None:
@@ -998,13 +1001,12 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(args.worker, "all")
         self.assertEqual(_command_from_args(args.command), "hostname")
 
-    def test_default_config_has_v4_interactive_entry(self) -> None:
+    def test_default_config_interactive_tpus_are_v4_only(self) -> None:
+        # This deployment configures no shared interactive TPUs, but if any are
+        # added later the code only supports v4.
         config = load_config()
-        self.assertIn("v4-4-01-interactive", config.interactive_tpus)
-        self.assertEqual(config.interactive_tpus["v4-4-01-interactive"].version, "v4")
-        self.assertIn("v4-16-01-interactive", config.interactive_tpus)
-        self.assertIn("v4-4-04-interactive", config.interactive_tpus)
-        self.assertEqual(config.interactive_tpus["v4-16-01-interactive"].workers, 4)
+        for tpu in config.interactive_tpus.values():
+            self.assertEqual(tpu.version, "v4")
 
     def test_default_config_has_v6e_four_chips_per_worker(self) -> None:
         config = load_config()
@@ -1013,7 +1015,6 @@ class SchedulerTests(unittest.TestCase):
             "v6-16": 4,
             "v6-32": 8,
             "v6-64": 16,
-            "v6-128": 32,
         }
 
         for resource_name, workers in expected_workers.items():

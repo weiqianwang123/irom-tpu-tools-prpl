@@ -1,225 +1,358 @@
-# Default IROM TPU queue configuration.
+# PRPL lab TPU queue configuration.
 #
-# Normal users only need write/read access to these queue prefixes. The
-# scheduler service account needs TPU Admin, Service Account User for the TPU
-# worker service accounts, Secret Manager access, and read/write access here.
+# Normal users only need write/read access to the queue bucket prefixes below.
+# The scheduler service account needs TPU Admin, Service Account User for the
+# TPU worker service accounts, Secret Manager access, and read/write here.
+#
+# ---------------------------------------------------------------------------
+# GCP identity for project tpu-tsilver-20260619 (number 944301850228).
+# Queue buckets, worker service account, and admin user are filled in below.
+# The 4 queue buckets must exist and be readable/writable by users and the
+# scheduler; the worker service account must be able to read code archives,
+# write logs, and access datasets/checkpoints.
+#
+# Modeling notes for the 6 quota grants:
+#   * spot and on-demand are SEPARATE GCP quotas even in the same zone, so v4
+#     spot and v4 on-demand are two quota groups (v4 / v4od) with distinct
+#     resource names. `tpu create v4 -n 32` picks the spot v4-32; on-demand is
+#     opt-in via `tpu create v4 -r v4od-32 -- ...`.
+#   * v6e in us-east1-d and v6e in europe-west4-a are separate regional quotas,
+#     so they are separate groups (v6 / v6eu). Europe is opt-in via
+#     `-r v6eu-64`; likewise v5eu for europe-west4-b.
+#   * `chips` here follows the accelerator-type suffix (v4-64 -> 64) so that the
+#     `-n` lookup and quota accounting stay in one unit. For v4 that suffix
+#     counts TensorCores (2 per physical chip): the v4 grant is 32 physical
+#     chips = 64 TensorCores, so the v4/v4od groups cap at 64 and the largest
+#     slice is v4-64 (`tpu create v4 -n 64`).
+# ---------------------------------------------------------------------------
 
 quota_groups:
   v4:
-    total_chips: 32
-  v5:
-    total_chips: 64
+    total_chips: 64       # 32 physical spot v4 chips = 64 TensorCores, us-central2-b
+  v4od:
+    total_chips: 64       # 32 physical on-demand v4 chips = 64 TensorCores, us-central2-b
   v6:
-    total_chips: 512
+    total_chips: 64       # 64 spot v6e, us-east1-d
+  v5:
+    total_chips: 64       # 64 spot v5e, us-central1-a
+  v6eu:
+    total_chips: 64       # 64 spot v6e, europe-west4-a
+  v5eu:
+    total_chips: 64       # 64 spot v5e, europe-west4-b
 
 resources:
-  v4-4:
-    version: v4
-    accelerator_type: v4-4
-    runtime_version: tpu-ubuntu2204-base
-    zone: us-central2-b
-    project: mae-irom-lab-guided-data
-    chips: 4
-    workers: 1
-    spot: true
-    enabled: true
-    quota_group: v4
-    service_account: tpu-sa-us-central2@mae-irom-lab-guided-data.iam.gserviceaccount.com
+  # --- v4 spot, us-central2-b ---
   v4-8:
     version: v4
     accelerator_type: v4-8
     runtime_version: tpu-ubuntu2204-base
     zone: us-central2-b
-    project: mae-irom-lab-guided-data
+    project: tpu-tsilver-20260619
     chips: 8
     workers: 1
     spot: true
     enabled: true
     quota_group: v4
-    service_account: tpu-sa-us-central2@mae-irom-lab-guided-data.iam.gserviceaccount.com
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
   v4-16:
     version: v4
     accelerator_type: v4-16
     runtime_version: tpu-ubuntu2204-base
     zone: us-central2-b
-    project: mae-irom-lab-guided-data
+    project: tpu-tsilver-20260619
     chips: 16
     workers: 2
     spot: true
     enabled: true
     quota_group: v4
-    service_account: tpu-sa-us-central2@mae-irom-lab-guided-data.iam.gserviceaccount.com
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
   v4-32:
     version: v4
     accelerator_type: v4-32
     runtime_version: tpu-ubuntu2204-base
     zone: us-central2-b
-    project: mae-irom-lab-guided-data
+    project: tpu-tsilver-20260619
     chips: 32
     workers: 4
     spot: true
     enabled: true
     quota_group: v4
-    service_account: tpu-sa-us-central2@mae-irom-lab-guided-data.iam.gserviceaccount.com
-  v5-8:
-    version: v5
-    accelerator_type: v5litepod-8
-    runtime_version: v2-alpha-tpuv5-lite
-    zone: us-central1-a
-    project: mae-irom-lab-guided-data
-    chips: 8
-    workers: 1
-    spot: true
-    enabled: true
-    quota_group: v5
-    service_account: tpu-sa-us-central1@mae-irom-lab-guided-data.iam.gserviceaccount.com
-  v5-16:
-    version: v5
-    accelerator_type: v5litepod-16
-    runtime_version: v2-alpha-tpuv5-lite
-    zone: us-central1-a
-    project: mae-irom-lab-guided-data
-    chips: 16
-    workers: 2
-    spot: true
-    enabled: true
-    quota_group: v5
-    service_account: tpu-sa-us-central1@mae-irom-lab-guided-data.iam.gserviceaccount.com
-  v5-32:
-    version: v5
-    accelerator_type: v5litepod-32
-    runtime_version: v2-alpha-tpuv5-lite
-    zone: us-central1-a
-    project: mae-irom-lab-guided-data
-    chips: 32
-    workers: 4
-    spot: true
-    enabled: true
-    quota_group: v5
-    service_account: tpu-sa-us-central1@mae-irom-lab-guided-data.iam.gserviceaccount.com
-  v5-64:
-    version: v5
-    accelerator_type: v5litepod-64
-    runtime_version: v2-alpha-tpuv5-lite
-    zone: us-central1-a
-    project: mae-irom-lab-guided-data
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v4-64:
+    version: v4
+    accelerator_type: v4-64
+    runtime_version: tpu-ubuntu2204-base
+    zone: us-central2-b
+    project: tpu-tsilver-20260619
     chips: 64
     workers: 8
     spot: true
     enabled: true
-    quota_group: v5
-    service_account: tpu-sa-us-central1@mae-irom-lab-guided-data.iam.gserviceaccount.com
+    quota_group: v4
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+
+  # --- v4 on-demand, us-central2-b (opt-in via -r v4od-N) ---
+  v4od-8:
+    version: v4
+    accelerator_type: v4-8
+    runtime_version: tpu-ubuntu2204-base
+    zone: us-central2-b
+    project: tpu-tsilver-20260619
+    chips: 8
+    workers: 1
+    spot: false
+    enabled: true
+    quota_group: v4od
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v4od-16:
+    version: v4
+    accelerator_type: v4-16
+    runtime_version: tpu-ubuntu2204-base
+    zone: us-central2-b
+    project: tpu-tsilver-20260619
+    chips: 16
+    workers: 2
+    spot: false
+    enabled: true
+    quota_group: v4od
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v4od-32:
+    version: v4
+    accelerator_type: v4-32
+    runtime_version: tpu-ubuntu2204-base
+    zone: us-central2-b
+    project: tpu-tsilver-20260619
+    chips: 32
+    workers: 4
+    spot: false
+    enabled: true
+    quota_group: v4od
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v4od-64:
+    version: v4
+    accelerator_type: v4-64
+    runtime_version: tpu-ubuntu2204-base
+    zone: us-central2-b
+    project: tpu-tsilver-20260619
+    chips: 64
+    workers: 8
+    spot: false
+    enabled: true
+    quota_group: v4od
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+
+  # --- v6e spot, us-east1-d ---
   v6-8:
     version: v6
     accelerator_type: v6e-8
     runtime_version: v2-alpha-tpuv6e
     zone: us-east1-d
-    project: mae-irom-lab-guided-data
+    project: tpu-tsilver-20260619
     chips: 8
     workers: 2
     spot: true
     enabled: true
     quota_group: v6
-    service_account: tpu-sa-us-east1@mae-irom-lab-guided-data.iam.gserviceaccount.com
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
   v6-16:
     version: v6
     accelerator_type: v6e-16
     runtime_version: v2-alpha-tpuv6e
     zone: us-east1-d
-    project: mae-irom-lab-guided-data
+    project: tpu-tsilver-20260619
     chips: 16
     workers: 4
     spot: true
     enabled: true
     quota_group: v6
-    service_account: tpu-sa-us-east1@mae-irom-lab-guided-data.iam.gserviceaccount.com
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
   v6-32:
     version: v6
     accelerator_type: v6e-32
     runtime_version: v2-alpha-tpuv6e
     zone: us-east1-d
-    project: mae-irom-lab-guided-data
+    project: tpu-tsilver-20260619
     chips: 32
     workers: 8
     spot: true
     enabled: true
     quota_group: v6
-    service_account: tpu-sa-us-east1@mae-irom-lab-guided-data.iam.gserviceaccount.com
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
   v6-64:
     version: v6
     accelerator_type: v6e-64
     runtime_version: v2-alpha-tpuv6e
     zone: us-east1-d
-    project: mae-irom-lab-guided-data
+    project: tpu-tsilver-20260619
     chips: 64
     workers: 16
     spot: true
     enabled: true
     quota_group: v6
-    service_account: tpu-sa-us-east1@mae-irom-lab-guided-data.iam.gserviceaccount.com
-  v6-128:
-    version: v6
-    accelerator_type: v6e-128
-    runtime_version: v2-alpha-tpuv6e
-    zone: us-east1-d
-    project: mae-irom-lab-guided-data
-    chips: 128
-    workers: 32
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+
+  # --- v5e spot, us-central1-a ---
+  v5-8:
+    version: v5
+    accelerator_type: v5litepod-8
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: us-central1-a
+    project: tpu-tsilver-20260619
+    chips: 8
+    workers: 1
     spot: true
     enabled: true
-    quota_group: v6
-    service_account: tpu-sa-us-east1@mae-irom-lab-guided-data.iam.gserviceaccount.com
+    quota_group: v5
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v5-16:
+    version: v5
+    accelerator_type: v5litepod-16
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: us-central1-a
+    project: tpu-tsilver-20260619
+    chips: 16
+    workers: 2
+    spot: true
+    enabled: true
+    quota_group: v5
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v5-32:
+    version: v5
+    accelerator_type: v5litepod-32
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: us-central1-a
+    project: tpu-tsilver-20260619
+    chips: 32
+    workers: 4
+    spot: true
+    enabled: true
+    quota_group: v5
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v5-64:
+    version: v5
+    accelerator_type: v5litepod-64
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: us-central1-a
+    project: tpu-tsilver-20260619
+    chips: 64
+    workers: 8
+    spot: true
+    enabled: true
+    quota_group: v5
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
 
+  # --- v6e spot, europe-west4-a (opt-in via -r v6eu-N) ---
+  v6eu-8:
+    version: v6
+    accelerator_type: v6e-8
+    runtime_version: v2-alpha-tpuv6e
+    zone: europe-west4-a
+    project: tpu-tsilver-20260619
+    chips: 8
+    workers: 2
+    spot: true
+    enabled: true
+    quota_group: v6eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v6eu-16:
+    version: v6
+    accelerator_type: v6e-16
+    runtime_version: v2-alpha-tpuv6e
+    zone: europe-west4-a
+    project: tpu-tsilver-20260619
+    chips: 16
+    workers: 4
+    spot: true
+    enabled: true
+    quota_group: v6eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v6eu-32:
+    version: v6
+    accelerator_type: v6e-32
+    runtime_version: v2-alpha-tpuv6e
+    zone: europe-west4-a
+    project: tpu-tsilver-20260619
+    chips: 32
+    workers: 8
+    spot: true
+    enabled: true
+    quota_group: v6eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v6eu-64:
+    version: v6
+    accelerator_type: v6e-64
+    runtime_version: v2-alpha-tpuv6e
+    zone: europe-west4-a
+    project: tpu-tsilver-20260619
+    chips: 64
+    workers: 16
+    spot: true
+    enabled: true
+    quota_group: v6eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+
+  # --- v5e spot, europe-west4-b (opt-in via -r v5eu-N) ---
+  v5eu-8:
+    version: v5
+    accelerator_type: v5litepod-8
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: europe-west4-b
+    project: tpu-tsilver-20260619
+    chips: 8
+    workers: 1
+    spot: true
+    enabled: true
+    quota_group: v5eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v5eu-16:
+    version: v5
+    accelerator_type: v5litepod-16
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: europe-west4-b
+    project: tpu-tsilver-20260619
+    chips: 16
+    workers: 2
+    spot: true
+    enabled: true
+    quota_group: v5eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v5eu-32:
+    version: v5
+    accelerator_type: v5litepod-32
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: europe-west4-b
+    project: tpu-tsilver-20260619
+    chips: 32
+    workers: 4
+    spot: true
+    enabled: true
+    quota_group: v5eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+  v5eu-64:
+    version: v5
+    accelerator_type: v5litepod-64
+    runtime_version: v2-alpha-tpuv5-lite
+    zone: europe-west4-b
+    project: tpu-tsilver-20260619
+    chips: 64
+    workers: 8
+    spot: true
+    enabled: true
+    quota_group: v5eu
+    service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+
+# One bucket per region. europe-west4-a and europe-west4-b share the
+# europe-west4 region and therefore one bucket.
 buckets:
-  us-central2: gs://pi0-cot/tpu-job-queue
-  us-central1: gs://v5_central1_a/tpu-job-queue
-  us-east1: gs://v6_east1d/tpu-job-queue
+  us-central2: gs://prpl-tpu-queue-us-central2-944301850228/tpu-job-queue
+  us-east1: gs://prpl-tpu-queue-us-east1-944301850228/tpu-job-queue
+  us-central1: gs://prpl-tpu-queue-us-central1-944301850228/tpu-job-queue
+  europe-west4: gs://prpl-tpu-queue-europe-west4-944301850228/tpu-job-queue
 
 primary_bucket_region: us-central2
 
-interactive_tpus:
-  v4-16-01-interactive:
-    version: v4
-    zone: us-central2-b
-    project: mae-irom-lab-guided-data
-    workers: 4
-    aliases:
-      - v4-16-interactive
-      - v4-32-interactive
-    description: Shared multi-host v4 interactive TPU.
-  v4-4-01-interactive:
-    version: v4
-    zone: us-central2-b
-    project: mae-irom-lab-guided-data
-    workers: 1
-    aliases:
-      - v4-interactive
-      - v4-4-interactive-01
-    description: Shared v4-8 interactive TPU.
-  v4-4-02-interactive:
-    version: v4
-    zone: us-central2-b
-    project: mae-irom-lab-guided-data
-    workers: 1
-    aliases:
-      - v4-4-interactive-02
-    description: Shared v4-8 interactive TPU.
-  v4-4-03-interactive:
-    version: v4
-    zone: us-central2-b
-    project: mae-irom-lab-guided-data
-    workers: 1
-    aliases:
-      - v4-4-interactive-03
-    description: Shared v4-8 interactive TPU.
-  v4-4-04-interactive:
-    version: v4
-    zone: us-central2-b
-    project: mae-irom-lab-guided-data
-    workers: 1
-    aliases:
-      - v4-4-interactive-04
-    description: Shared v4-8 interactive TPU.
+# No shared interactive TPUs configured yet. To add them later, restore an
+# `interactive_tpus:` block (the code currently supports v4 only).
 
 scheduler:
   scan_interval_seconds: 30
@@ -228,14 +361,16 @@ scheduler:
   heartbeat_timeout_seconds: 600
   status_write_interval_seconds: 60
   job_retention_days: 30
-  qr_prefix: iq
+  qr_prefix: prpl
   qr_label_workaround: false
 
 user_limits:
   default_max_chips: 192
   users:
-    admin: null
+    robin: null
 
 # Optional default Secret Manager mappings for queued workers. Keep empty unless
 # the referenced secret exists and the TPU service account can read it.
+# Example:
+#   WANDB_API_KEY: wandb-api-key
 secrets: {}

@@ -781,7 +781,7 @@ ps -u "$USER" -o pid,ppid,stat,etime,%cpu,%mem,cmd \
   | grep -v grep \
   | head -n 80 || true
 echo "logs:"
-for d in "$HOME/ego-lap/logs" "$HOME"/worktrees/ego-lap/*/logs "$HOME"/deployed_code/*/logs; do
+for d in "$HOME"/deployed_code/*/logs; do
   if [ -d "$d" ]; then
     echo "DIR=$d"
     ls -lt "$d" | sed -n "1,8p"

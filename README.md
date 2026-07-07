@@ -37,10 +37,15 @@ gs://.../tpu-job-queue/
 ## Installation
 
 ```bash
-pipx install --force /home/lzha/code/irom-tpu-tools
+pipx install --force git+https://github.com/weiqianwang123/irom-tpu-tools-prpl.git
 export PATH="$HOME/.local/bin:$PATH"
 tpu --help
 ```
+
+The PRPL lab configuration (project, buckets, zones, quotas) is packaged into
+the wheel, so lab members do not need to touch any infrastructure config. They
+do need `gcloud` authenticated (`gcloud auth application-default login`) and
+their Google account granted read/write on the queue buckets.
 
 Optional custom config:
 
