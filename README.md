@@ -3,6 +3,18 @@
 Queue-backed TPU scheduling for IROM. Normal users submit jobs to a central
 GCS queue; a scheduler identity creates/deletes queued resources and TPU VMs.
 
+## PRPL Lab Guides
+
+This fork is configured for the PRPL lab TPU queue. Start with the guide for
+your role:
+
+- [PRPL_USER.md](PRPL_USER.md) — for normal lab users: install the CLI, submit
+  jobs, check status, view logs, and cancel jobs. Users do not need to SSH into
+  the scheduler VM.
+- [PRPL_ADMIN.md](PRPL_ADMIN.md) — for admins: how the scheduler VM is deployed,
+  how to SSH in, check and restart the scheduler service, and avoid deleting or
+  duplicating the scheduler.
+
 ## How It Works
 
 The tool splits responsibilities across three roles:
@@ -45,7 +57,9 @@ tpu --help
 The PRPL lab configuration (project, buckets, zones, quotas) is packaged into
 the wheel, so lab members do not need to touch any infrastructure config. They
 do need `gcloud` authenticated (`gcloud auth application-default login`) and
-their Google account granted read/write on the queue buckets.
+their Google account granted read/write on the queue buckets. See
+[PRPL_USER.md](PRPL_USER.md) for the full user walkthrough and
+[PRPL_ADMIN.md](PRPL_ADMIN.md) for scheduler deployment and maintenance.
 
 Optional custom config:
 
