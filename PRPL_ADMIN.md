@@ -93,6 +93,65 @@ tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
 
 This service account needs permission to read job code, write logs, and access any dataset or checkpoint buckets used by training jobs.
 
+## Data and checkpoint buckets
+
+Users need somewhere to put datasets and read/write checkpoints. The queue buckets are not for this. Instead, the lab provides one data bucket and one checkpoint bucket per TPU region. Users do not create buckets; they upload into a subfolder named after themselves. Creating these buckets is an admin task because each one must also be granted to the worker service account.
+
+Naming convention (one pair per region):
+
+```text
+gs://prpl-data-<region>-944301850228     # datasets (read-only for workers)
+gs://prpl-ckpt-<region>-944301850228     # checkpoints/outputs (writable by workers)
+```
+
+Regions that need buckets (match the TPU regions):
+
+```text
+us-east1       for v6
+us-central1    for v5
+us-central2    for v4
+europe-west4   for v6eu / v5eu
+```
+
+The data bucket must be in the same region as the TPU that reads it. Cross-region reads are slower and incur egress charges; cross-continent is worse. Tell users: data lives in the same region as the TPU.
+
+Create the buckets and grant access. Run this in Cloud Shell (fast, inside Google's network). It creates both buckets for each region, grants the worker service account read on data and read/write on checkpoints, and grants the users group read/write on both so members can upload and retrieve:
+
+```bash
+PROJECT=tpu-tsilver-20260619
+WORKER_SA=tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+USERS_GROUP=group:prpl-tpu-users@googlegroups.com   # or grant per user with user:EMAIL
+
+for region in us-east1 us-central1 us-central2 europe-west4; do
+  data="gs://prpl-data-${region}-944301850228"
+  ckpt="gs://prpl-ckpt-${region}-944301850228"
+
+  gcloud storage buckets create "$data" --project="$PROJECT" --location="$region"
+  gcloud storage buckets create "$ckpt" --project="$PROJECT" --location="$region"
+
+  # Worker service account: read datasets, read/write checkpoints.
+  gcloud storage buckets add-iam-policy-binding "$data" \
+    --member="serviceAccount:${WORKER_SA}" --role=roles/storage.objectViewer
+  gcloud storage buckets add-iam-policy-binding "$ckpt" \
+    --member="serviceAccount:${WORKER_SA}" --role=roles/storage.objectAdmin
+
+  # Lab users: upload data and retrieve checkpoints.
+  gcloud storage buckets add-iam-policy-binding "$data" \
+    --member="$USERS_GROUP" --role=roles/storage.objectAdmin
+  gcloud storage buckets add-iam-policy-binding "$ckpt" \
+    --member="$USERS_GROUP" --role=roles/storage.objectAdmin
+done
+```
+
+To start, you only need the regions you actually use (for example just `us-east1` for v6). Add the others when needed.
+
+If a user prefers to use their own existing GCS bucket, that works too, but you must grant the worker service account access to it, and it should be in the same region as the TPU:
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://their-own-bucket \
+  --member="serviceAccount:${WORKER_SA}" --role=roles/storage.objectViewer   # objectAdmin if they write to it
+```
+
 ## Scheduler permissions
 
 The scheduler identity needs enough permission to create and delete TPU VMs, attach the worker service account to TPU VMs, and read or write the queue buckets.

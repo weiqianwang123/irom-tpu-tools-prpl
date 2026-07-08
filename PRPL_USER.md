@@ -176,6 +176,95 @@ tpu delete robin-test
 
 Use this if a job is stuck, submitted incorrectly, or no longer needed.
 
+## Complete example: from zero to a running training job
+
+This walks through one full training run end to end. It assumes you finished
+"Before you start" (access granted, gcloud installed, signed in) and installed
+the CLI.
+
+The example uses v6 (region us-east1). If you use a different TPU version, swap
+the region and buckets using the table in "Data and checkpoint storage".
+
+**1. Confirm your access works.**
+
+```bash
+gcloud storage ls gs://prpl-tpu-queue-us-east1-944301850228/
+tpu list --resources v6
+```
+
+**2. Upload your dataset to the region's data bucket, under your username.**
+
+```bash
+gcloud storage cp -r ./my-dataset \
+  gs://prpl-data-us-east1-944301850228/qw3601/my-dataset
+gcloud storage ls gs://prpl-data-us-east1-944301850228/qw3601/my-dataset/
+```
+
+**3. Make sure your training code is a git repository.**
+
+`tpu create` bundles the code with git, so `--code-dir` must be a git repo. You
+do not need to commit, but it must be initialized.
+
+```bash
+cd /path/to/your-training-repo
+git status   # if "not a git repository", run: git init && git add -A && git commit -m init
+```
+
+Your training script should read `DATA_DIR` and `OUTPUT_DIR` from the
+environment (see "Data and checkpoint storage"), write checkpoints to
+`OUTPUT_DIR`, and resume from the latest checkpoint on startup.
+
+**4. Submit a small test first.**
+
+Start with the smallest size (`-n 8`) and a short run to confirm everything
+works before launching a long job.
+
+```bash
+tpu create v6 -n 8 --user qw3601 --name my-run-test \
+  --code-dir "$PWD" \
+  --setup-cmd "pip install -e ." \
+  --env DATA_DIR=gs://prpl-data-us-east1-944301850228/qw3601/my-dataset \
+  --env OUTPUT_DIR=gs://prpl-ckpt-us-east1-944301850228/qw3601/my-run-test \
+  -- python train.py --max-steps 50
+```
+
+**5. Watch it reach RUNNING and check the logs.**
+
+Check every minute or so; do not leave a follow command running.
+
+```bash
+tpu status my-run-test
+tpu logs my-run-test --lines 200
+```
+
+Status moves through `PENDING` → `PROVISIONING` (`WAITING_FOR_RESOURCES` while a
+spot TPU is being allocated) → `RUNNING` → `SUCCEEDED`. Spot TPUs can sit in
+`WAITING_FOR_RESOURCES` for a few minutes until capacity is available.
+
+**6. Launch the real run.**
+
+Once the test succeeds, submit the full job with a fresh name and, if you need
+more chips, a larger size (for example `-n 32`).
+
+```bash
+tpu create v6 -n 32 --user qw3601 --name my-run \
+  --code-dir "$PWD" \
+  --setup-cmd "pip install -e ." \
+  --env DATA_DIR=gs://prpl-data-us-east1-944301850228/qw3601/my-dataset \
+  --env OUTPUT_DIR=gs://prpl-ckpt-us-east1-944301850228/qw3601/my-run \
+  -- python train.py
+```
+
+**7. Retrieve results.**
+
+Your checkpoints and outputs are in `OUTPUT_DIR`. Download them if you want a
+local copy:
+
+```bash
+gcloud storage ls gs://prpl-ckpt-us-east1-944301850228/qw3601/my-run/
+gcloud storage cp -r gs://prpl-ckpt-us-east1-944301850228/qw3601/my-run ./my-run-output
+```
+
 ## Interactive TPU access
 
 If shared interactive TPUs are configured, list them:
@@ -202,21 +291,81 @@ Only use interactive TPUs for debugging and small experiments. Do not use them a
 
 ## Data and checkpoint storage
 
-The queue buckets are not for datasets or checkpoints.
+The queue buckets (`prpl-tpu-queue-*`) are only for job specs, uploaded code bundles, logs, and status files. **Do not put datasets or checkpoints in them.**
 
-The queue buckets are only for job specs, uploaded code bundles, logs, and status files.
+For datasets and checkpoints, the lab provides shared buckets. **You do not create buckets** — an admin has already created them. You just upload into your own subfolder and read/write from your training script.
 
-For training data and checkpoints, use a separate dataset or checkpoint bucket approved by the lab.
+### The shared buckets
 
-For spot TPU jobs, make sure your training script saves checkpoints frequently and can resume after interruption.
+There is one data bucket and one checkpoint bucket per TPU region. **Use the bucket in the same region as the TPU you run on** — reading data across regions is slower and costs egress fees.
+
+| TPU version | Region | Data bucket | Checkpoint bucket |
+|---|---|---|---|
+| v6 (`tpu create v6`) | us-east1 | `gs://prpl-data-us-east1-944301850228` | `gs://prpl-ckpt-us-east1-944301850228` |
+| v5 (`tpu create v5`) | us-central1 | `gs://prpl-data-us-central1-944301850228` | `gs://prpl-ckpt-us-central1-944301850228` |
+| v4 (`tpu create v4`) | us-central2 | `gs://prpl-data-us-central2-944301850228` | `gs://prpl-ckpt-us-central2-944301850228` |
+| v6eu / v5eu (`-r v6eu-*` / `-r v5eu-*`) | europe-west4 | `gs://prpl-data-europe-west4-944301850228` | `gs://prpl-ckpt-europe-west4-944301850228` |
+
+Rule of thumb: **the data must live in the same region as the TPU.** If your TPU is in us-east1, put the data in the us-east1 data bucket.
+
+### Upload your data
+
+Put your data under a subfolder named after you, so users do not collide:
+
+```bash
+gcloud storage cp -r ./my-dataset \
+  gs://prpl-data-us-east1-944301850228/qw3601/my-dataset
+```
+
+Check it landed:
+
+```bash
+gcloud storage ls gs://prpl-data-us-east1-944301850228/qw3601/
+```
+
+If your data is already in another GCS bucket, copy it server-side (fast, no local download) — but make sure the destination region matches your TPU:
+
+```bash
+gcloud storage cp -r gs://some-other-bucket/my-dataset \
+  gs://prpl-data-us-east1-944301850228/qw3601/my-dataset
+```
+
+Uploading a large dataset from a slow or high-latency connection can be slow. Cloud Shell (https://shell.cloud.google.com) runs inside Google's network and is much faster for both uploads and job submission.
+
+### Point your training job at the buckets
+
+Pass the paths as environment variables and read them in your script:
+
+```bash
+tpu create v6 -n 8 --user qw3601 --name my-run \
+  --code-dir "$PWD" \
+  --setup-cmd "pip install -e ." \
+  --env DATA_DIR=gs://prpl-data-us-east1-944301850228/qw3601/my-dataset \
+  --env OUTPUT_DIR=gs://prpl-ckpt-us-east1-944301850228/qw3601/my-run \
+  -- python train.py
+```
+
+In your script:
+
+```python
+import os
+data_dir = os.environ["DATA_DIR"]      # gs://prpl-data-.../qw3601/my-dataset
+output_dir = os.environ["OUTPUT_DIR"]  # gs://prpl-ckpt-.../qw3601/my-run
+```
+
+Most JAX/TensorFlow data and checkpoint libraries (`tf.data`, `tensorflow-io`, `orbax`) read and write `gs://` paths directly, so you usually do not need to download anything by hand.
+
+If you already have your own GCS bucket you would rather use, that is fine, but an admin must grant the TPU worker service account access to it, and it should be in the same region as the TPU. Ask an admin.
+
+### Checkpointing (required for spot TPUs)
 
 Recommended checkpoint behavior:
 
 ```text
-save checkpoints to durable storage
-save checkpoints every 10 to 30 minutes for long jobs
-make the training script resume automatically from the latest checkpoint
-avoid storing important outputs only on the TPU VM local disk
+save checkpoints to OUTPUT_DIR (a gs:// path), not the TPU local disk
+save every 10 to 30 minutes for long jobs
+on startup, look in OUTPUT_DIR for the latest checkpoint and resume from it
+never store important outputs only on the TPU VM local disk (it is erased on preemption)
 ```
 
 ## Spot TPU warning
