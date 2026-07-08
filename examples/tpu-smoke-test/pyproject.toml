@@ -1,0 +1,14 @@
+[project]
+name = "tpu-smoke-test"
+version = "0.1.0"
+description = "Minimal TPU + JAX smoke test for the PRPL TPU queue"
+requires-python = ">=3.8"
+# No dependencies are declared here on purpose: JAX with TPU support is
+# installed by the queue job's --setup-cmd, because the correct JAX/libtpu
+# build depends on the TPU generation and must come from Google's release
+# index rather than plain PyPI.
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -10,7 +10,7 @@ Before you can submit jobs, you need access to the project and a few tools insta
 
 ### 1. Get access (ask an admin)
 
-Your Google account must be added to the project before any `tpu` command will work. Ask a PRPL TPU admin to:
+Your Google account must be added to the project before any `tpu` command will work. Ask a PRPL TPU admin(Currently Robin) through gmail(qw3601@princeton.edu) or Slack to:
 
 ```text
 add your Google account to the project tpu-tsilver-20260619
