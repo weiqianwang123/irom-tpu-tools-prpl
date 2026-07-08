@@ -168,6 +168,29 @@ The scheduler should not use personal credentials long term. A dedicated schedul
 
 Shared Gmail credentials were only used during initial setup and should not be committed to the repository.
 
+## Checking TPU quota
+
+To see how many TPU chips each region is *allowed* to run, use the helper
+script (it reads the Cloud Quotas API and, if the `tpu` CLI is available, also
+prints the queue's current usage per group):
+
+```bash
+./contrib/prpl-quota.sh
+# or for another project:
+PROJECT=other-project ./contrib/prpl-quota.sh
+```
+
+Reading quota may require `roles/cloudquotas.viewer` (or `serviceusage.quotas.get`);
+if it errors, run it with an admin account. The current PRPL quotas are 64 spot
+chips each for v6e (us-east1-d and europe-west4-a), v5e-litepod (us-central1-a
+and europe-west4-b), and v4 (us-central2-b), plus 64 on-demand v4 in
+us-central2-b.
+
+Quota is a ceiling, not availability. GCP does not expose real-time spot
+capacity through any API. Whether a specific size can be provisioned right now
+is only discoverable by submitting a job and watching `tpu status` move from
+`WAITING_FOR_RESOURCES` to `ACTIVE`.
+
 ## Current systemd service
 
 The scheduler is managed as a systemd user service:
