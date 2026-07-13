@@ -51,6 +51,8 @@ class ResourceConfig:
     enabled: bool
     quota_group: str
     service_account: str | None = None
+    network: str | None = None
+    subnetwork: str | None = None
 
 
 @dataclass(frozen=True)

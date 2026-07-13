@@ -137,6 +137,8 @@ resources:
     spot: true
     enabled: true
     quota_group: v6
+    network: default
+    subnetwork: test-us-east1
 buckets:
   us-east1: gs://test-bucket/queue
 primary_bucket_region: us-east1
@@ -246,6 +248,33 @@ class SchedulerTests(unittest.TestCase):
             )
         )
 
+    def test_gcp_create_includes_configured_network_and_subnetwork(self) -> None:
+        backend = GCPBackend()
+        run = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        backend._run = run
+
+        self.assertTrue(
+            backend.create_queued_resource(
+                name="qr-a",
+                node_id="qr-a",
+                project="project",
+                zone="us-central2-b",
+                accelerator_type="v4-8",
+                runtime_version="tpu-ubuntu2204-base",
+                spot=False,
+                startup_script_path="/tmp/startup.sh",
+                service_account=None,
+                network="default",
+                subnetwork="prpl-tpu-us-central2",
+            )
+        )
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--network") + 1], "default")
+        self.assertEqual(
+            command[command.index("--subnetwork") + 1],
+            "prpl-tpu-us-central2",
+        )
+
     def test_gcp_read_distinguishes_missing_object_from_probe_failure(self) -> None:
         backend = GCPBackend()
         backend._run = Mock(
@@ -296,6 +325,33 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(backend.create_calls, 2)
             self.assertNotIn("job-a", scheduler._create_retry_not_before)
             self.assertEqual(scheduler.jobs["job-a"].state.status, JobStatus.PROVISIONING)
+
+    def test_scheduler_passes_resource_network_to_backend(self) -> None:
+        class CapturingBackend(DryRunBackend):
+            create_kwargs: dict | None = None
+
+            def create_queued_resource(self, **kwargs) -> bool:
+                self.create_kwargs = kwargs
+                return super().create_queued_resource(**kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = CapturingBackend(d)
+            config = make_config(Path(d))
+            config.resources["v6-8"] = replace(
+                config.resources["v6-8"],
+                network="default",
+                subnetwork="test-us-east1",
+            )
+            write_job(backend, config.primary_bucket, make_spec("job-a"))
+
+            Scheduler(backend, config).run_once()
+
+            assert backend.create_kwargs is not None
+            self.assertEqual(backend.create_kwargs["network"], "default")
+            self.assertEqual(
+                backend.create_kwargs["subnetwork"],
+                "test-us-east1",
+            )
 
     def test_scans_independent_job_records_concurrently(self) -> None:
         class TrackingBackend(DryRunBackend):
@@ -798,6 +854,27 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn(None, config.user_limits.users.values())
         self.assertEqual(config.user_limits.default_max_chips, 192)
         self.assertEqual(config.scheduler.create_failure_backoff, 300)
+        for name in (
+            "v4-8",
+            "v4-16",
+            "v4-32",
+            "v4-64",
+            "v4od-8",
+            "v4od-16",
+            "v4od-32",
+            "v4od-64",
+        ):
+            self.assertEqual(config.resources[name].network, "default")
+            self.assertEqual(
+                config.resources[name].subnetwork,
+                "prpl-tpu-us-central2",
+            )
+
+    def test_resource_network_config_is_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            config = load_config(write_config_file(Path(d)))
+        self.assertEqual(config.resources["v6-8"].network, "default")
+        self.assertEqual(config.resources["v6-8"].subnetwork, "test-us-east1")
 
     def test_startup_script_has_centralized_sentinels_and_no_local_watcher(self) -> None:
         script = build_startup_script(

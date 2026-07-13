@@ -93,6 +93,46 @@ tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
 
 This service account needs permission to read job code, write logs, and access any dataset or checkpoint buckets used by training jobs.
 
+## V4 network in us-central2
+
+The `default` auto-mode VPC does not automatically provide a subnet in the
+private `us-central2` region. Both the v4 spot (`v4-*`) and v4 on-demand
+(`v4od-*`) queue resources therefore explicitly use:
+
+```text
+Network:    default
+Subnetwork: prpl-tpu-us-central2
+Region:     us-central2
+CIDR:       10.10.0.0/20
+```
+
+Create the subnet once with a project identity that has
+`compute.subnetworks.create` permission:
+
+```bash
+gcloud compute networks subnets create prpl-tpu-us-central2 \
+  --project=tpu-tsilver-20260619 \
+  --network=default \
+  --region=us-central2 \
+  --range=10.10.0.0/20 \
+  --enable-private-ip-google-access
+```
+
+Do not try to name this manually created subnet `default`: that name is
+reserved for automatically created subnets in an auto-mode VPC. The scheduler
+must be installed from a version of this repository that passes the configured
+network and subnetwork to queued-resource creation. Without that code, v4
+requests remain `PENDING` and the scheduler log reports that subnetwork
+`default` does not exist.
+
+Verify the subnet:
+
+```bash
+gcloud compute networks subnets describe prpl-tpu-us-central2 \
+  --project=tpu-tsilver-20260619 \
+  --region=us-central2
+```
+
 ## Data and checkpoint buckets
 
 Users need somewhere to put datasets and read/write checkpoints. The queue buckets are not for this. Instead, the lab provides one data bucket and one checkpoint bucket per TPU region. Users do not create buckets; they upload into a subfolder named after themselves. Creating these buckets is an admin task because each one must also be granted to the worker service account.

@@ -24,6 +24,9 @@
 #     counts TensorCores (2 per physical chip): the v4 grant is 32 physical
 #     chips = 64 TensorCores, so the v4/v4od groups cap at 64 and the largest
 #     slice is v4-64 (`tpu create v4 -n 64`).
+#   * us-central2 does not receive an automatic subnet in the default auto-mode
+#     VPC. All v4/v4od resources explicitly use the separately provisioned
+#     `prpl-tpu-us-central2` subnet in the `default` network.
 # ---------------------------------------------------------------------------
 
 quota_groups:
@@ -54,6 +57,8 @@ resources:
     enabled: true
     quota_group: v4
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
   v4-16:
     version: v4
     accelerator_type: v4-16
@@ -66,6 +71,8 @@ resources:
     enabled: true
     quota_group: v4
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
   v4-32:
     version: v4
     accelerator_type: v4-32
@@ -78,6 +85,8 @@ resources:
     enabled: true
     quota_group: v4
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
   v4-64:
     version: v4
     accelerator_type: v4-64
@@ -90,6 +99,8 @@ resources:
     enabled: true
     quota_group: v4
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
 
   # --- v4 on-demand, us-central2-b (opt-in via -r v4od-N) ---
   v4od-8:
@@ -104,6 +115,8 @@ resources:
     enabled: true
     quota_group: v4od
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
   v4od-16:
     version: v4
     accelerator_type: v4-16
@@ -116,6 +129,8 @@ resources:
     enabled: true
     quota_group: v4od
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
   v4od-32:
     version: v4
     accelerator_type: v4-32
@@ -128,6 +143,8 @@ resources:
     enabled: true
     quota_group: v4od
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
   v4od-64:
     version: v4
     accelerator_type: v4-64
@@ -140,6 +157,8 @@ resources:
     enabled: true
     quota_group: v4od
     service_account: tpu-worker@tpu-tsilver-20260619.iam.gserviceaccount.com
+    network: default
+    subnetwork: prpl-tpu-us-central2
 
   # --- v6e spot, us-east1-d ---
   v6-8:

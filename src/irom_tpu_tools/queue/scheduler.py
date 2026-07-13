@@ -513,6 +513,8 @@ class Scheduler:
             spot=resource.spot,
             startup_script_path=script_path,
             service_account=resource.service_account,
+            network=resource.network,
+            subnetwork=resource.subnetwork,
             label_workaround=self.config.scheduler.qr_label_workaround,
         )
         if not ok:

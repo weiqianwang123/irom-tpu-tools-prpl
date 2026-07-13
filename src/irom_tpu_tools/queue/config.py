@@ -71,6 +71,8 @@ def parse_config(raw: dict[str, Any]) -> QueueConfig:
             enabled=bool(cfg.get("enabled", True)),
             quota_group=quota_group,
             service_account=cfg.get("service_account"),
+            network=(str(cfg["network"]) if cfg.get("network") else None),
+            subnetwork=(str(cfg["subnetwork"]) if cfg.get("subnetwork") else None),
         )
 
     if not resources:

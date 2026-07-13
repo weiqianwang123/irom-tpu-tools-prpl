@@ -36,6 +36,8 @@ class Backend(ABC):
         spot: bool,
         startup_script_path: str,
         service_account: str | None,
+        network: str | None = None,
+        subnetwork: str | None = None,
         label_workaround: bool = False,
     ) -> bool:
         raise NotImplementedError
@@ -165,6 +167,8 @@ class GCPBackend(Backend):
         spot: bool,
         startup_script_path: str,
         service_account: str | None,
+        network: str | None = None,
+        subnetwork: str | None = None,
         label_workaround: bool = False,
     ) -> bool:
         cmd = [
@@ -192,6 +196,10 @@ class GCPBackend(Backend):
             cmd.extend(["--provisioning-model", "SPOT", "--spot"])
         if service_account:
             cmd.extend(["--service-account", service_account])
+        if network:
+            cmd.extend(["--network", network])
+        if subnetwork:
+            cmd.extend(["--subnetwork", subnetwork])
         if label_workaround:
             cmd.append("--labels=env=prod")
         try:
@@ -632,6 +640,8 @@ class DryRunBackend(Backend):
         spot: bool,
         startup_script_path: str,
         service_account: str | None,
+        network: str | None = None,
+        subnetwork: str | None = None,
         label_workaround: bool = False,
     ) -> bool:
         if name in self.queued_resources:
