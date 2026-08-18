@@ -144,6 +144,13 @@ gs://prpl-data-<region>-944301850228     # datasets (read-only for workers)
 gs://prpl-ckpt-<region>-944301850228     # checkpoints/outputs (writable by workers)
 ```
 
+Soft delete is disabled on all shared data and checkpoint buckets. This is an
+intentional cost-control policy: training jobs overwrite checkpoints frequently,
+and retaining every deleted checkpoint for the default seven days caused several
+TiB of hidden, billable storage. Deletions from these buckets are therefore
+permanent. Queue buckets keep the default seven-day soft delete policy because
+they are small and contain scheduler metadata that can be useful for recovery.
+
 Regions that need buckets (match the TPU regions):
 
 ```text
@@ -166,8 +173,10 @@ for region in us-east1 us-central1 us-central2 europe-west4; do
   data="gs://prpl-data-${region}-944301850228"
   ckpt="gs://prpl-ckpt-${region}-944301850228"
 
-  gcloud storage buckets create "$data" --project="$PROJECT" --location="$region"
-  gcloud storage buckets create "$ckpt" --project="$PROJECT" --location="$region"
+  gcloud storage buckets create "$data" --project="$PROJECT" --location="$region" \
+    --soft-delete-duration=0
+  gcloud storage buckets create "$ckpt" --project="$PROJECT" --location="$region" \
+    --soft-delete-duration=0
 
   # Worker service account: read datasets, read/write checkpoints.
   gcloud storage buckets add-iam-policy-binding "$data" \
@@ -183,6 +192,26 @@ for region in us-east1 us-central1 us-central2 europe-west4; do
 done
 ```
 
+Verify the deletion policy after creating or changing a bucket:
+
+```bash
+gcloud storage buckets describe gs://prpl-data-us-central2-944301850228 \
+  --format='value(soft_delete_policy.retentionDurationSeconds)'
+gcloud storage buckets describe gs://prpl-ckpt-us-central2-944301850228 \
+  --format='value(soft_delete_policy.retentionDurationSeconds)'
+```
+
+The expected value is `0`. To disable soft delete on an existing shared data or
+checkpoint bucket, run:
+
+```bash
+gcloud storage buckets update gs://BUCKET_NAME --clear-soft-delete
+```
+
+Changing this setting does not immediately remove objects that were already
+soft-deleted. Those objects remain billable and recoverable until the retention
+deadline assigned when they were deleted expires.
+
 To start, you only need the regions you actually use (for example just `us-east1` for v6). Add the others when needed.
 
 If a user prefers to use their own existing GCS bucket, that works too, but you must grant the worker service account access to it, and it should be in the same region as the TPU:
@@ -191,6 +220,69 @@ If a user prefers to use their own existing GCS bucket, that works too, but you 
 gcloud storage buckets add-iam-policy-binding gs://their-own-bucket \
   --member="serviceAccount:${WORKER_SA}" --role=roles/storage.objectViewer   # objectAdmin if they write to it
 ```
+
+## Incident record: scheduler shutdown and storage cost review (2026-08-17 to 2026-08-19)
+
+### Impact and scheduler root cause
+
+On 2026-08-17, queued jobs remained `PENDING` and cancellation requests did not
+complete because the central scheduler VM was not running. No scheduler code
+change preceded the outage.
+
+Compute Engine records show that `prpl-tpu-scheduler` was stopped at
+2026-08-17 00:44:24 UTC (08:44:24 China Standard Time). The stop operations were
+issued by Google control-plane identities
+`gce-control-project-clh-flows@prod.google.com` and
+`cloud-cluster-manager@prod.google.com`. Inside the guest, systemd received a
+virtual power-button event and performed a clean shutdown; that event was the
+mechanism used by the GCE stop operation, not evidence of a person pressing a
+physical button or logging into the VM.
+
+The stop coincided with the Cloud Billing account's $300 Free Trial credit
+reaching its end on 2026-08-17. The evidence is consistent with the billing
+lifecycle control plane stopping project resources after the trial became
+inactive. `theprplgroup@gmail.com` manually started the VM at
+2026-08-17 19:59:25 UTC (2026-08-18 03:59:25 China Standard Time), after which
+the scheduler resumed processing and the stuck cancellation completed. Billing
+is currently enabled for the project.
+
+### Storage cost findings
+
+TRC-granted Cloud TPU capacity is free, but supporting GCP services such as
+Cloud Storage and the scheduler VM are billable. The storage investigation found:
+
+```text
+Checkpoint data written:              approximately 18.5 TB
+Cloud Storage DeleteObject requests:  approximately 22,391
+Latest live checkpoint storage:       approximately 1.74 TiB
+Latest soft-deleted checkpoints:      approximately 4.58 TiB
+Estimated historical soft-delete storage cost: approximately $72.70
+```
+
+The dollar figure is an estimate from Cloud Monitoring byte-seconds and public
+regional Standard Storage pricing, not a replacement for the Cloud Billing SKU
+report.
+
+The deletion volume was programmatic rather than evidence of users manually
+deleting thousands of objects. The inspected job specifications used
+`--overwrite` and saved every 2,000 steps. The training code removes the previous
+checkpoint directory when starting in overwrite mode, and Orbax is configured
+with `max_to_keep=1`, which deletes the previous checkpoint when a new one is
+saved. Those operations ran from TPU workers using the shared worker service
+account. Cloud Storage Data Access audit logs were not enabled, so historical
+individual object deletes cannot be attributed to a specific human identity.
+
+### Mitigation applied on 2026-08-19
+
+Soft delete was disabled on all eight shared `prpl-data-*` and `prpl-ckpt-*`
+buckets in `us-east1`, `us-central1`, `us-central2`, and `europe-west4`. All four
+`prpl-tpu-queue-*` buckets retain the default seven-day policy. Existing
+soft-deleted objects cannot be purged early and will be permanently deleted as
+their previously assigned seven-day retention windows expire.
+
+Because shared data and checkpoint deletions are now permanent, admins must
+make this policy clear during onboarding and users must keep independent copies
+of irreplaceable source data.
 
 ## Scheduler permissions
 

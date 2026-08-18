@@ -308,6 +308,54 @@ There is one data bucket and one checkpoint bucket per TPU region. **Use the buc
 
 Rule of thumb: **the data must live in the same region as the TPU.** If your TPU is in us-east1, put the data in the us-east1 data bucket.
 
+### Storage ownership, deletion, and cost
+
+Soft delete is disabled on all shared `prpl-data-*` and `prpl-ckpt-*` buckets
+to prevent frequently replaced checkpoints from accumulating hidden storage
+charges. Deleting or overwriting an object in these buckets is permanent; there
+is no seven-day recovery window. Keep an independent copy of any source dataset
+or result that cannot be recreated.
+
+Each user is responsible for the storage under their username prefix. Review it
+after every experiment batch and at least weekly while jobs are active:
+
+```bash
+# Check the total size of your data and checkpoints.
+gcloud storage du -s gs://prpl-data-us-central2-944301850228/qw3601/**
+gcloud storage du -s gs://prpl-ckpt-us-central2-944301850228/qw3601/**
+
+# Inspect an old run before deleting it.
+gcloud storage ls --long --recursive \
+  gs://prpl-ckpt-us-central2-944301850228/qw3601/old-run/**
+```
+
+After downloading or otherwise preserving the results you need, remove abandoned,
+failed, duplicate, and obsolete runs using the exact run prefix:
+
+```bash
+gcloud storage cp -r \
+  gs://prpl-ckpt-us-central2-944301850228/qw3601/old-run \
+  ./old-run-backup
+
+gcloud storage rm --recursive \
+  gs://prpl-ckpt-us-central2-944301850228/qw3601/old-run
+```
+
+Before running `rm`, verify the bucket, region, username, and run name. Never
+delete a bucket root or another user's prefix. A mistaken deletion cannot be
+restored by the PRPL administrators.
+
+To limit ongoing costs:
+
+```text
+reuse one dataset copy across experiments instead of uploading duplicates
+keep only the checkpoints needed for recovery or evaluation
+remove outputs from failed and abandoned runs promptly
+avoid saving checkpoints more frequently than the recovery objective requires
+use max_to_keep or equivalent retention settings in the training framework
+keep data and the TPU in the same region to avoid network egress charges
+```
+
 ### Upload your data
 
 Put your data under a subfolder named after you, so users do not collide:
