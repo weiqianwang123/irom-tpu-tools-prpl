@@ -319,6 +319,20 @@ or result that cannot be recreated.
 Each user is responsible for the storage under their username prefix. Review it
 after every experiment batch and at least weekly while jobs are active:
 
+Shared storage has an advisory per-user limit, aggregated across every
+`prpl-data-*` and `prpl-ckpt-*` bucket in all regions:
+
+```text
+new users by default: 1 TB (1,000,000,000,000 bytes)
+users with an approved exception: the limit recorded by the administrator
+```
+
+This is a cost-control threshold, not a hard Cloud Storage quota. The daily
+audit reports overages but does not block an upload or delete data. If you need
+more than the default 1 TB, contact the TPU administrator before uploading and
+explain the expected size and retention period. Additional capacity is approved
+case by case.
+
 ```bash
 # Check the total size of your data and checkpoints.
 gcloud storage du -s gs://prpl-data-us-central2-944301850228/qw3601/**

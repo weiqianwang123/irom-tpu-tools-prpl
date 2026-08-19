@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ from .types import (
     QuotaGroupConfig,
     ResourceConfig,
     SchedulerConfig,
+    StorageAuditConfig,
     UserLimitConfig,
 )
 
@@ -26,6 +27,7 @@ class QueueConfig:
     secrets: dict[str, str]
     user_limits: UserLimitConfig
     interactive_tpus: dict[str, InteractiveTPUConfig]
+    storage_audit: StorageAuditConfig = field(default_factory=StorageAuditConfig)
 
     @property
     def primary_bucket(self) -> str:
@@ -113,6 +115,18 @@ def parse_config(raw: dict[str, Any]) -> QueueConfig:
         },
     )
 
+    storage_raw = raw.get("storage_audit", {})
+    decimal_tb = 1_000_000_000_000
+    storage_audit = StorageAuditConfig(
+        buckets=tuple(str(value).rstrip("/") for value in storage_raw.get("buckets", [])),
+        report_url=str(storage_raw.get("report_url", "")).rstrip("/"),
+        default_limit_bytes=int(storage_raw.get("default_limit_tb", 1) * decimal_tb),
+        users={
+            str(user): int(limit_tb * decimal_tb)
+            for user, limit_tb in storage_raw.get("users", {}).items()
+        },
+    )
+
     interactive_tpus: dict[str, InteractiveTPUConfig] = {}
     for name, cfg in raw.get("interactive_tpus", {}).items():
         version = str(cfg.get("version", "v4"))
@@ -139,6 +153,7 @@ def parse_config(raw: dict[str, Any]) -> QueueConfig:
         secrets={str(k): str(v) for k, v in raw.get("secrets", {}).items()},
         user_limits=user_limits,
         interactive_tpus=interactive_tpus,
+        storage_audit=storage_audit,
     )
 
 

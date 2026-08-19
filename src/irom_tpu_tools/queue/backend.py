@@ -22,6 +22,12 @@ class GCSReadResult:
     succeeded: bool
 
 
+@dataclass(frozen=True)
+class GCSListResult:
+    urls: list[str]
+    succeeded: bool
+
+
 class Backend(ABC):
     @abstractmethod
     def create_queued_resource(
@@ -115,6 +121,9 @@ class Backend(ABC):
     def list_gcs(self, prefix: str) -> list[str]:
         raise NotImplementedError
 
+    def list_gcs_result(self, prefix: str) -> GCSListResult:
+        return GCSListResult(urls=self.list_gcs(prefix), succeeded=True)
+
     @abstractmethod
     def delete_gcs(self, url: str, recursive: bool = False) -> bool:
         raise NotImplementedError
@@ -173,7 +182,6 @@ class GCPBackend(Backend):
     ) -> bool:
         cmd = [
             "gcloud",
-            "alpha",
             "compute",
             "tpus",
             "queued-resources",
@@ -193,7 +201,11 @@ class GCPBackend(Backend):
             "--async",
         ]
         if spot:
-            cmd.extend(["--provisioning-model", "SPOT", "--spot"])
+            # Use the documented GA queued-resource command and its legacy
+            # `spot` field for training VMs. The alpha command also sends a
+            # node provisioningModel; SPOT can hit serving quota, while its
+            # STANDARD default is incompatible with a spot queued resource.
+            cmd.append("--spot")
         if service_account:
             cmd.extend(["--service-account", service_account])
         if network:
@@ -496,11 +508,20 @@ class GCPBackend(Backend):
     def exists_gcs(self, url: str) -> bool:
         return self._run(["gcloud", "storage", "ls", url], check=False, timeout=10).returncode == 0
 
-    def list_gcs(self, prefix: str) -> list[str]:
+    def list_gcs_result(self, prefix: str) -> GCSListResult:
         result = self._run(["gcloud", "storage", "ls", prefix], check=False, timeout=15)
         if result.returncode != 0:
-            return []
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if "matched no objects" in (result.stderr or "").lower():
+                return GCSListResult(urls=[], succeeded=True)
+            logger.warning("Failed to list GCS prefix %s (exit %s)", prefix, result.returncode)
+            return GCSListResult(urls=[], succeeded=False)
+        return GCSListResult(
+            urls=[line.strip() for line in result.stdout.splitlines() if line.strip()],
+            succeeded=True,
+        )
+
+    def list_gcs(self, prefix: str) -> list[str]:
+        return self.list_gcs_result(prefix).urls
 
     def delete_gcs(self, url: str, recursive: bool = False) -> bool:
         cmd = ["gcloud", "storage", "rm"]

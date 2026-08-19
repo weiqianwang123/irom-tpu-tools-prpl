@@ -388,6 +388,25 @@ user_limits:
   users:
     robin: null
 
+# Advisory storage thresholds. Cloud Storage cannot enforce a capacity quota
+# on a shared bucket prefix, so the daily audit reports overages without
+# deleting data or blocking uploads. Values are decimal TB (10^12 bytes).
+storage_audit:
+  default_limit_tb: 1
+  users:
+    lj8040: 2
+    ss1824: 2
+  report_url: gs://prpl-tpu-queue-us-central2-944301850228/tpu-job-queue/admin/storage-audit/latest.json
+  buckets:
+    - gs://prpl-data-us-east1-944301850228
+    - gs://prpl-ckpt-us-east1-944301850228
+    - gs://prpl-data-us-central1-944301850228
+    - gs://prpl-ckpt-us-central1-944301850228
+    - gs://prpl-data-us-central2-944301850228
+    - gs://prpl-ckpt-us-central2-944301850228
+    - gs://prpl-data-europe-west4-944301850228
+    - gs://prpl-ckpt-europe-west4-944301850228
+
 # Optional default Secret Manager mappings for queued workers. Keep empty unless
 # the referenced secret exists and the TPU service account can read it.
 # Example:

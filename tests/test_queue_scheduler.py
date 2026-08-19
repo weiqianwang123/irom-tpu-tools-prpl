@@ -14,7 +14,12 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from irom_tpu_tools.queue.backend import DryRunBackend, GCPBackend, GCSReadResult
+from irom_tpu_tools.queue.backend import (
+    DryRunBackend,
+    GCPBackend,
+    GCSListResult,
+    GCSReadResult,
+)
 from irom_tpu_tools.queue.cli import (
     _command_from_args,
     _scheduler_lock,
@@ -25,6 +30,7 @@ from irom_tpu_tools.queue.config import QueueConfig, load_config
 from irom_tpu_tools.queue.interactive import _permission_hint, resolve_interactive_tpu
 from irom_tpu_tools.queue.scheduler import Scheduler
 from irom_tpu_tools.queue.startup_script import build_startup_script
+from irom_tpu_tools.queue.storage_audit import collect_storage_report
 from irom_tpu_tools.queue.types import (
     AttemptRecord,
     JobResources,
@@ -35,6 +41,7 @@ from irom_tpu_tools.queue.types import (
     QuotaGroupConfig,
     ResourceConfig,
     SchedulerConfig,
+    StorageAuditConfig,
     UserLimitConfig,
     utc_now,
 )
@@ -150,6 +157,77 @@ interactive_tpus: {}
     return path
 
 
+class StorageAuditTests(unittest.TestCase):
+    def test_aggregates_buckets_and_applies_user_overrides(self) -> None:
+        config = StorageAuditConfig(
+            buckets=("gs://data", "gs://ckpt"),
+            report_url="gs://queue/admin/storage-audit/latest.json",
+            default_limit_bytes=1_000,
+            users={"alice": 2_000},
+        )
+        responses = {
+            ("gcloud", "storage", "ls", "gs://data/"): (
+                0,
+                "gs://data/alice/\ngs://data/bob/\n",
+                "",
+            ),
+            ("gcloud", "storage", "ls", "gs://ckpt/"): (
+                0,
+                "gs://ckpt/alice/\n",
+                "",
+            ),
+            (
+                "gcloud",
+                "storage",
+                "du",
+                "--summarize",
+                "gs://data/alice/**",
+            ): (0, "1200 gs://data/alice/**\n", ""),
+            (
+                "gcloud",
+                "storage",
+                "du",
+                "--summarize",
+                "gs://data/bob/**",
+            ): (0, "1100 gs://data/bob/**\n", ""),
+            (
+                "gcloud",
+                "storage",
+                "du",
+                "--summarize",
+                "gs://ckpt/alice/**",
+            ): (0, "600 gs://ckpt/alice/**\n", ""),
+        }
+
+        def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            returncode, stdout, stderr = responses[tuple(command)]
+            return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+        report = collect_storage_report(config, run=run)
+
+        self.assertTrue(report["complete"])
+        users = {row["user"]: row for row in report["users"]}
+        self.assertEqual(users["alice"]["total_bytes"], 1800)
+        self.assertEqual(users["alice"]["limit_bytes"], 2000)
+        self.assertFalse(users["alice"]["over_limit"])
+        self.assertEqual(users["bob"]["limit_bytes"], 1000)
+        self.assertTrue(users["bob"]["over_limit"])
+
+    def test_records_bucket_scan_failures(self) -> None:
+        config = StorageAuditConfig(
+            buckets=("gs://data",),
+            report_url="gs://queue/report.json",
+        )
+
+        def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(command, 1, "", "permission denied")
+
+        report = collect_storage_report(config, run=run)
+
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["errors"][0]["operation"], "list")
+
+
 class SchedulerTests(unittest.TestCase):
     def test_single_worker_ssh_keeps_bash_script_in_one_remote_argument(self) -> None:
         command = "set -e; printf quoted-ok"
@@ -247,6 +325,50 @@ class SchedulerTests(unittest.TestCase):
                 service_account=None,
             )
         )
+
+    def test_gcp_spot_create_uses_training_spot_flag_only(self) -> None:
+        backend = GCPBackend()
+        run = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        backend._run = run
+
+        self.assertTrue(
+            backend.create_queued_resource(
+                name="qr-v5",
+                node_id="qr-v5",
+                project="project",
+                zone="us-central1-a",
+                accelerator_type="v5litepod-8",
+                runtime_version="tpu-ubuntu2204-base",
+                spot=True,
+                startup_script_path="/tmp/startup.sh",
+                service_account=None,
+            )
+        )
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[:5],
+            ["gcloud", "compute", "tpus", "queued-resources", "create"],
+        )
+        self.assertNotIn("alpha", command)
+        self.assertIn("--spot", command)
+        self.assertNotIn("--provisioning-model", command)
+        self.assertNotIn("SPOT", command)
+
+    def test_gcp_empty_gcs_prefix_is_a_successful_listing(self) -> None:
+        backend = GCPBackend()
+        backend._run = Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                1,
+                "",
+                "ERROR: (gcloud.storage.ls) One or more URLs matched no objects.\n",
+            )
+        )
+
+        result = backend.list_gcs_result("gs://bucket/jobs/")
+
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.urls, [])
 
     def test_gcp_create_includes_configured_network_and_subnetwork(self) -> None:
         backend = GCPBackend()
@@ -383,6 +505,91 @@ class SchedulerTests(unittest.TestCase):
 
             self.assertEqual(len(scheduler.jobs), 4)
             self.assertGreater(backend.max_active_reads, 1)
+
+    def test_failed_cold_start_status_read_does_not_resurrect_or_delete_job(self) -> None:
+        class FailingStatusBackend(DryRunBackend):
+            fail_status_read = False
+
+            def read_gcs_result(self, url: str) -> GCSReadResult:
+                if self.fail_status_read and url.endswith("/status.json"):
+                    return GCSReadResult(content=None, succeeded=False)
+                return super().read_gcs_result(url)
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = FailingStatusBackend(d)
+            config = make_config(Path(d))
+            job_dir = write_job(backend, config.primary_bucket, make_spec("job-a"))
+            original = Scheduler(backend, config)
+            original.run_once()
+            qr_name = next(iter(backend.queued_resources))
+            original_status = backend.read_gcs(f"{job_dir}/status.json")
+
+            backend.fail_status_read = True
+            restarted = Scheduler(backend, config)
+            restarted.run_once()
+
+            self.assertFalse(restarted._job_scan_succeeded)
+            self.assertNotIn("job-a", restarted.jobs)
+            self.assertIn(qr_name, backend.queued_resources)
+            self.assertEqual(backend.read_gcs(f"{job_dir}/status.json"), original_status)
+
+            backend.fail_status_read = False
+            restarted.run_once()
+            self.assertTrue(restarted._job_scan_succeeded)
+            self.assertIn("job-a", restarted.jobs)
+            self.assertIn(qr_name, backend.queued_resources)
+
+    def test_failed_cold_start_job_listing_does_not_delete_queued_resources(self) -> None:
+        class FailingListBackend(DryRunBackend):
+            fail_job_listing = False
+
+            def list_gcs_result(self, prefix: str) -> GCSListResult:
+                if self.fail_job_listing and prefix.endswith("/jobs/"):
+                    return GCSListResult(urls=[], succeeded=False)
+                return super().list_gcs_result(prefix)
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = FailingListBackend(d)
+            config = make_config(Path(d))
+            write_job(backend, config.primary_bucket, make_spec("job-a"))
+            original = Scheduler(backend, config)
+            original.run_once()
+            qr_name = next(iter(backend.queued_resources))
+
+            backend.fail_job_listing = True
+            restarted = Scheduler(backend, config)
+            restarted.run_once()
+
+            self.assertFalse(restarted._job_scan_succeeded)
+            self.assertIn(qr_name, backend.queued_resources)
+
+    def test_incomplete_cold_start_does_not_schedule_partially_loaded_jobs(self) -> None:
+        class PartiallyFailingBackend(DryRunBackend):
+            def read_gcs_result(self, url: str) -> GCSReadResult:
+                if url.endswith("/job-a/status.json"):
+                    return GCSReadResult(content=None, succeeded=False)
+                return super().read_gcs_result(url)
+
+        with tempfile.TemporaryDirectory() as d:
+            backend = PartiallyFailingBackend(d)
+            config = make_config(Path(d))
+            write_job(backend, config.primary_bucket, make_spec("job-a"))
+            job_b_dir = write_job(
+                backend, config.primary_bucket, make_spec("job-b")
+            )
+
+            scheduler = Scheduler(backend, config)
+            scheduler.run_once()
+
+            self.assertFalse(scheduler._job_scan_succeeded)
+            self.assertNotIn("job-a", scheduler.jobs)
+            self.assertIn("job-b", scheduler.jobs)
+            self.assertEqual(backend.queued_resources, {})
+            state = JobState.from_dict(
+                json.loads(backend.read_gcs(f"{job_b_dir}/status.json") or "{}")
+            )
+            self.assertEqual(state.status, JobStatus.PENDING)
+            self.assertIsNone(state.current_qr_name)
 
     def test_schedules_and_requeues_after_preemption(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -853,6 +1060,10 @@ class SchedulerTests(unittest.TestCase):
         # (the admin identity, whatever it is named in this deployment).
         self.assertIn(None, config.user_limits.users.values())
         self.assertEqual(config.user_limits.default_max_chips, 192)
+        self.assertEqual(config.storage_audit.default_limit_bytes, 1_000_000_000_000)
+        self.assertEqual(config.storage_audit.limit_bytes_for("new-user"), 1_000_000_000_000)
+        self.assertEqual(config.storage_audit.limit_bytes_for("lj8040"), 2_000_000_000_000)
+        self.assertEqual(config.storage_audit.limit_bytes_for("ss1824"), 2_000_000_000_000)
         self.assertEqual(config.scheduler.create_failure_backoff, 300)
         for name in (
             "v4-8",

@@ -27,6 +27,7 @@ from .config import (
 from . import interactive as interactive_tools
 from .packaging import compute_checksum, create_code_tarball, generate_job_id
 from .scheduler import Scheduler
+from .storage_audit import collect_storage_report, format_decimal_storage
 from .types import (
     AttemptFailureType,
     AttemptRecord,
@@ -894,6 +895,89 @@ def cmd_admin_resources(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_storage_report(report: dict[str, Any], report_url: str) -> None:
+    generated_at = str(report.get("generated_at") or "unknown")
+    scan_complete = bool(report.get("complete"))
+    print(f"Storage audit generated: {generated_at}")
+    print(f"Report: {report_url}")
+    print(
+        "Scan: "
+        + ("complete" if report.get("complete") else "INCOMPLETE (see errors below)")
+    )
+    print()
+    rows = []
+    for item in report.get("users", []):
+        total_bytes = int(item.get("total_bytes", 0))
+        limit_bytes = int(item.get("limit_bytes", 0))
+        percent = float(item.get("percent_used", 0))
+        rows.append(
+            [
+                str(item.get("user", "unknown")),
+                format_decimal_storage(total_bytes),
+                format_decimal_storage(limit_bytes),
+                f"{percent:.1f}%",
+                (
+                    "UNKNOWN"
+                    if not scan_complete
+                    else ("OVER" if item.get("over_limit") else "OK")
+                ),
+            ]
+        )
+    _print_table(["USER", "USED", "ADVISORY LIMIT", "USED %", "STATUS"], rows)
+    errors = report.get("errors") or []
+    if errors:
+        print()
+        print("Scan errors:")
+        for error in errors:
+            target = "/".join(
+                value
+                for value in (str(error.get("bucket", "")), str(error.get("user", "")))
+                if value
+            )
+            print(
+                f"  {error.get('operation', 'unknown')} {target}: "
+                f"{error.get('message', 'unknown error')}"
+            )
+
+
+def cmd_admin_storage(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    audit_config = config.storage_audit
+    if not audit_config.report_url:
+        raise SystemExit("storage_audit.report_url is not configured")
+    if args.output and not args.refresh:
+        raise SystemExit("--output requires --refresh")
+    backend = _backend(args)
+
+    if args.refresh:
+        report = collect_storage_report(audit_config)
+        content = json.dumps(report, indent=2, sort_keys=True) + "\n"
+        if not backend.write_gcs(audit_config.report_url, content):
+            print(f"Failed to upload storage audit report: {audit_config.report_url}")
+            return 1
+        if args.output:
+            output_path = Path(args.output).expanduser()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content)
+    else:
+        content = backend.read_gcs(audit_config.report_url)
+        if not content:
+            print("No storage audit report exists yet.")
+            print("Run: tpu admin storage --refresh")
+            return 1
+        try:
+            report = json.loads(content)
+        except json.JSONDecodeError as exc:
+            print(f"Storage audit report is invalid JSON: {exc}")
+            return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_storage_report(report, audit_config.report_url)
+    return 0 if report.get("complete") else 1
+
+
 def cmd_admin_qrs(args: argparse.Namespace) -> int:
     config = _load_config(args)
     backend = _backend(args)
@@ -1502,6 +1586,25 @@ def build_parser() -> argparse.ArgumentParser:
     admin.set_defaults(func=lambda args: (admin.print_help() or 0))
     resources = admin_sub.add_parser("resources", help="Show quota and resource config")
     resources.set_defaults(func=cmd_admin_resources)
+    storage = admin_sub.add_parser(
+        "storage",
+        help="Show the latest per-user shared-storage audit",
+        description=(
+            "Show the latest advisory data/checkpoint usage report. Use --refresh "
+            "to rescan every configured shared bucket and publish a new report."
+        ),
+    )
+    storage.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Scan shared buckets now and upload a new report",
+    )
+    storage.add_argument("--json", action="store_true", help="Print raw report JSON")
+    storage.add_argument(
+        "--output",
+        help="Also write refreshed JSON to this local path (requires --refresh)",
+    )
+    storage.set_defaults(func=cmd_admin_storage)
     jobs = admin_sub.add_parser("jobs", help="List queue jobs across users")
     jobs.add_argument("--user")
     jobs.add_argument("--active", "-a", action="store_true")

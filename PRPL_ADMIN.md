@@ -212,6 +212,74 @@ Changing this setting does not immediately remove objects that were already
 soft-deleted. Those objects remain billable and recoverable until the retention
 deadline assigned when they were deleted expires.
 
+### Per-user storage audit and advisory limits
+
+Cloud Storage does not provide a capacity quota for a username prefix inside a
+shared bucket. The lab therefore uses a daily advisory audit; it does not block
+uploads and never deletes objects. Usage is the sum of live objects under a
+user's top-level prefix across all configured `prpl-data-*` and `prpl-ckpt-*`
+buckets. The scan is read-only and does not restart the scheduler or interrupt
+running TPU jobs. Because active jobs can write checkpoints while a scan is in
+progress, the result is an approximate point-in-time total.
+
+The policy is:
+
+```text
+lj8040:                 2 TB
+ss1824:                 2 TB
+all future/new users:   1 TB by default
+```
+
+Here TB is decimal (`1 TB = 1,000,000,000,000 bytes`), matching storage billing
+units. Users who need more must request an individual exception with an
+expected size and retention period. Record an approved exception under
+`storage_audit.users` in `src/irom_tpu_tools/queue/resources.yaml`; do not raise
+the default for everyone.
+
+The timer publishes its latest JSON report to:
+
+```text
+gs://prpl-tpu-queue-us-central2-944301850228/tpu-job-queue/admin/storage-audit/latest.json
+```
+
+Admins normally read the report as a table from any authenticated machine with
+queue-bucket access:
+
+```bash
+tpu admin storage
+```
+
+To scan immediately, publish a new report, and optionally retrieve raw JSON:
+
+```bash
+tpu admin storage --refresh
+tpu admin storage --json
+```
+
+Install and enable the daily timer on the scheduler VM after installing the
+current package from this repository:
+
+```bash
+install -d ~/.config/systemd/user
+install -m 0644 contrib/systemd/irom-tpu-storage-audit.service \
+  ~/.config/systemd/user/
+install -m 0644 contrib/systemd/irom-tpu-storage-audit.timer \
+  ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now irom-tpu-storage-audit.timer
+systemctl --user start irom-tpu-storage-audit.service
+```
+
+The scheduled scan runs daily at 03:15 UTC with up to 15 minutes of randomized
+delay and catches up after VM downtime. Verify both the schedule and the last
+run:
+
+```bash
+systemctl --user list-timers irom-tpu-storage-audit.timer
+systemctl --user status irom-tpu-storage-audit.service
+tpu admin storage
+```
+
 To start, you only need the regions you actually use (for example just `us-east1` for v6). Add the others when needed.
 
 If a user prefers to use their own existing GCS bucket, that works too, but you must grant the worker service account access to it, and it should be in the same region as the TPU:
@@ -284,6 +352,32 @@ Because shared data and checkpoint deletions are now permanent, admins must
 make this policy clear during onboarding and users must keep independent copies
 of irreplaceable source data.
 
+## Incident record: scheduler cold-start reconciliation (2026-08-19)
+
+After restarting the scheduler to correct the v5e Spot request flags, its
+cold-start scan launched eight concurrent `gcloud storage` readers on the
+two-vCPU scheduler VM. Some reads reached the 15-second timeout. The backend
+represented both a missing object and a failed read as `None`, so four old
+terminal jobs whose `status.json` reads timed out were incorrectly loaded as new
+`PENDING` jobs. The incomplete in-memory job map then caused orphan
+reconciliation to delete four legitimate v4 on-demand queued resources.
+
+All eight affected queued resources were still `WAITING_FOR_RESOURCES`; none had
+an active TPU VM, so no running training process or user data was stopped. The
+four legitimate jobs did lose their Google queue positions. Their job states
+were backed up and reset to `PENDING` with attempt 0 so they could be safely
+requeued without charging a failed attempt. The four historical jobs were
+restored to their original terminal states from their attempt success/failure
+markers, and the four incorrectly created waiting resources were deleted.
+
+The scheduler now distinguishes missing GCS objects from read/list failures,
+treats an empty prefix as a successful empty listing, and performs no creates,
+deletes, cancellations, retries, or status writes after an incomplete scan.
+Orphan reconciliation has an additional incomplete-scan guard. Cold-start scan
+concurrency is limited to two workers to match the VM's two vCPUs. Regression
+tests cover status-read failure, job-list failure, partially loaded queues,
+empty prefixes, and the v5e Spot command.
+
 ## Scheduler permissions
 
 The scheduler identity needs enough permission to create and delete TPU VMs, attach the worker service account to TPU VMs, and read or write the queue buckets.
@@ -294,6 +388,7 @@ The scheduler identity needs:
 roles/tpu.admin
 roles/iam.serviceAccountUser on tpu-worker
 roles/storage.objectAdmin on all queue buckets
+roles/storage.objectViewer on all shared data/checkpoint buckets (storage audit)
 ```
 
 The scheduler should not use personal credentials long term. A dedicated scheduler service account is preferred.
@@ -302,9 +397,10 @@ Shared Gmail credentials were only used during initial setup and should not be c
 
 ## Checking TPU quota
 
-To see how many TPU chips each region is *allowed* to run, use the helper
-script (it reads the Cloud Quotas API and, if the `tpu` CLI is available, also
-prints the queue's current usage per group):
+To see how many TPU quota units each configured zone and region is *allowed* to
+run, use the helper script. It reads each quota's current `effectiveLimit` from
+the Service Usage consumer-quota API and, if the `tpu` CLI is available, also
+prints the queue's current usage per group:
 
 ```bash
 ./contrib/prpl-quota.sh
@@ -312,11 +408,41 @@ prints the queue's current usage per group):
 PROJECT=other-project ./contrib/prpl-quota.sh
 ```
 
-Reading quota may require `roles/cloudquotas.viewer` (or `serviceusage.quotas.get`);
-if it errors, run it with an admin account. The current PRPL quotas are 64 spot
-chips each for v6e (us-east1-d and europe-west4-a), v5e-litepod (us-central1-a
-and europe-west4-b), and v4 (us-central2-b), plus 64 on-demand v4 in
-us-central2-b.
+The command requires an authenticated `gcloud` installation with its alpha
+commands available. It intentionally uses `gcloud alpha services quota list`
+instead of the newer Cloud Quotas API because the latter requires an additional
+`cloudquotas.quotas.get` permission that ordinary project users may not have.
+
+The live values last verified on **2026-08-20** are:
+
+| Queue group | GCP quota metric | Zone | Effective zone / region limit |
+|---|---|---|---:|
+| `v4` | `tpu-v4s-pod-preemptible` | `us-central2-b` | 64 / 64 |
+| `v4od` | `tpu-v4s-pod` | `us-central2-b` | 64 / 64 |
+| `v6` | `tpu-v6e-preemptible` | `us-east1-d` | 64 / 64 |
+| `v5` | `tpu-v5s-litepod-preemptible` | `us-central1-a` | 64 / 64 |
+| `v6eu` | `tpu-v6e-preemptible` | `europe-west4-a` | 64 / 64 |
+| `v5eu` | `tpu-v5s-litepod-preemptible` | `europe-west4-b` | 64 / 64 |
+
+Both the zone and region limits apply, so record and check both. Treat this
+table as a dated snapshot; the helper script is the source of truth and should
+be rerun after any quota request or Google-side quota change. If a value changes,
+update this table and the matching `quota_groups.*.total_chips` value in
+`src/irom_tpu_tools/queue/resources.yaml` together.
+
+Do not confuse the normal v5e Spot metric above with the separate serving
+metrics. The current default per-zone limits for
+`tpu-v5s-litepod-serving-preemptible` and `tpu-v5s-litepod-serving` are both 4.
+The earlier `Limit: 4` error named the serving-preemptible metric; it did not
+show that the queue's normal `v5` training quota had fallen from 64 to 4. The
+2026-08-19 incident was traced to the scheduler using the alpha create command
+with both `--provisioning-model SPOT` and `--spot`. Removing only the provisioning
+model was also insufficient: that alpha command defaulted the node model to
+`STANDARD`, which the API rejected as incompatible with Spot. The queue now uses
+Google's documented GA command, `gcloud compute tpus queued-resources create
+... --spot`, which sends the queued-resource Spot field without the conflicting
+node provisioning model. This was corrected without changing the scheduler's
+`v5` quota group.
 
 Quota is a ceiling, not availability. GCP does not expose real-time spot
 capacity through any API. Whether a specific size can be provisioned right now

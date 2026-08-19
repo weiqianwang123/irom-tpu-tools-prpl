@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_TPU_VM_STATES = {"PREEMPTED", "TERMINATED", "STOPPED", "DELETED", "FAILED"}
 RETRY_TPU_VM_HEALTH = {"TIMEOUT", "UNHEALTHY_MAINTENANCE"}
-JOB_SCAN_WORKERS = 8
+# Match the scheduler VM's two vCPUs. Higher gcloud subprocess concurrency
+# causes CPU contention and cold-start read timeouts on this host.
+JOB_SCAN_WORKERS = 2
 INTERACTIVE_KEY_SYNC_INTERVAL = 300
 
 
@@ -52,37 +54,57 @@ class Scheduler:
         self._last_orphan_check = 0.0
         self._last_interactive_key_sync = 0.0
         self._create_retry_not_before: dict[str, float] = {}
+        self._job_scan_succeeded = True
 
     def _job_dir(self, job: Job) -> str:
         return job.job_dir
 
     def scan_jobs(self) -> None:
+        succeeded = True
         for bucket in self.config.buckets.values():
-            self._scan_bucket(bucket)
+            bucket_succeeded = self._scan_bucket(bucket)
+            succeeded = bucket_succeeded and succeeded
+        self._job_scan_succeeded = succeeded
 
-    def _scan_bucket(self, bucket: str) -> None:
+    def _scan_bucket(self, bucket: str) -> bool:
         bucket = bucket.rstrip("/")
         pending: list[tuple[str, str]] = []
-        for job_dir in self.backend.list_gcs(f"{bucket}/jobs/"):
+        listing = self.backend.list_gcs_result(f"{bucket}/jobs/")
+        if not listing.succeeded:
+            return False
+        for job_dir in listing.urls:
             job_id = job_dir.rstrip("/").rsplit("/", 1)[-1]
             if job_id in self.jobs:
                 continue
             pending.append((job_id, bucket))
 
+        succeeded = True
         with ThreadPoolExecutor(max_workers=JOB_SCAN_WORKERS) as executor:
             loaded = executor.map(lambda item: self._load_job(*item), pending)
-            for job_id, job in loaded:
+            for job_id, job, load_succeeded in loaded:
+                succeeded = load_succeeded and succeeded
                 if job is None:
                     continue
                 self._add_job(job_id, job)
+        return succeeded
 
-    def _load_job(self, job_id: str, bucket: str) -> tuple[str, Job | None]:
-        spec_json = self.backend.read_gcs(f"{bucket}/jobs/{job_id}/spec.json")
+    def _load_job(self, job_id: str, bucket: str) -> tuple[str, Job | None, bool]:
+        spec_result = self.backend.read_gcs_result(
+            f"{bucket}/jobs/{job_id}/spec.json"
+        )
+        if not spec_result.succeeded:
+            return job_id, None, False
+        spec_json = spec_result.content
         if not spec_json:
-            return job_id, None
+            return job_id, None, True
         try:
             spec = JobSpec.from_dict(json.loads(spec_json))
-            status_json = self.backend.read_gcs(f"{bucket}/jobs/{job_id}/status.json")
+            status_result = self.backend.read_gcs_result(
+                f"{bucket}/jobs/{job_id}/status.json"
+            )
+            if not status_result.succeeded:
+                return job_id, None, False
+            status_json = status_result.content
             state = (
                 JobState.from_dict(json.loads(status_json))
                 if status_json
@@ -90,8 +112,8 @@ class Scheduler:
             )
         except (json.JSONDecodeError, KeyError, ValueError) as exc:
             logger.warning("Skipping invalid job %s: %s", job_id, exc)
-            return job_id, None
-        return job_id, Job(spec=spec, state=state, bucket=bucket)
+            return job_id, None, False
+        return job_id, Job(spec=spec, state=state, bucket=bucket), True
 
     def _add_job(self, job_id: str, job: Job) -> None:
         state = job.state
@@ -616,6 +638,9 @@ class Scheduler:
         self.sync_interactive_ssh_key_requests()
 
     def _maybe_reconcile_orphans(self) -> None:
+        if not self._job_scan_succeeded:
+            logger.warning("Skipping orphan reconciliation after incomplete job scan")
+            return
         now = time.time()
         if now - self._last_orphan_check < 300:
             return
@@ -675,6 +700,9 @@ class Scheduler:
         if focus_job_ref and focus_user:
             raise ValueError("Cannot combine focus_job_ref and focus_user")
         self.scan_jobs()
+        if not self._job_scan_succeeded:
+            logger.warning("Skipping scheduler iteration after incomplete job scan")
+            return
         focus_job_id = self._resolve_job_id(focus_job_ref) if focus_job_ref else None
         if focus_job_id:
             job_ids = {focus_job_id}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the PRPL shared-storage audit every day
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=irom-tpu-storage-audit.service
+
+[Install]
+WantedBy=timers.target

@@ -8,7 +8,8 @@
 # only discoverable by submitting a job and watching whether it moves from
 # WAITING_FOR_RESOURCES to ACTIVE.
 #
-# Section 1 (TPU QUOTA): from the Cloud Quotas API — the per-region limits.
+# Section 1 (TPU QUOTA): from the Service Usage consumer-quota API — the
+#           effective per-zone and per-region limits used by this queue.
 # Section 2 (QUEUE USAGE): from `tpu admin resources` — how many chips this
 #           queue is currently using per quota group (needs queue bucket read
 #           access; skipped if the tpu CLI or access is unavailable).
@@ -17,9 +18,7 @@
 #   ./contrib/prpl-quota.sh                       # default project below
 #   PROJECT=my-project ./contrib/prpl-quota.sh    # override project
 #
-# Requirements: gcloud (authenticated), python3. Reading quota may need
-# roles/cloudquotas.viewer or serviceusage.quotas.get; if you get a permission
-# error, run it with an admin account.
+# Requirements: gcloud (authenticated, with the alpha component), python3.
 
 set -euo pipefail
 
@@ -30,63 +29,81 @@ echo
 
 echo "=== 1. TPU QUOTA (max you are ALLOWED to run — NOT live free capacity) ==="
 
-token="$(gcloud auth print-access-token 2>/dev/null || true)"
-if [[ -z "${token}" ]]; then
-  echo "  Could not get an access token. Run 'gcloud auth login' first."
+if ! quota_json="$(
+  gcloud alpha services quota list \
+    --service=tpu.googleapis.com \
+    --consumer="projects/${PROJECT}" \
+    --format=json
+)"; then
+  echo "  Could not read TPU quota. Check gcloud authentication and project access."
   exit 1
 fi
 
-url="https://cloudquotas.googleapis.com/v1/projects/${PROJECT}/locations/global/services/tpu.googleapis.com/quotaInfos?pageSize=200"
-
-curl -s -H "Authorization: Bearer ${token}" "${url}" | python3 -c '
+printf "%s\n" "${quota_json}" | python3 -c '
 import sys, json
 
 try:
     data = json.load(sys.stdin)
 except json.JSONDecodeError:
-    print("  Could not parse quota API response (permission denied?).")
-    sys.exit(0)
+    print("  Could not parse Service Usage quota response.")
+    sys.exit(1)
 
-if "error" in data:
-    print("  Quota API error:", data["error"].get("message", data["error"]))
-    sys.exit(0)
+metrics = {item.get("metric"): item for item in data}
 
-rows = []
-for q in data.get("quotaInfos", []):
-    metric = q.get("metric", "")
-    # Only accelerator-count metrics for TPU; skip qps / queuedResources.
-    if "/tpu-v" not in metric:
-        continue
-    accel = metric.rsplit("/", 1)[-1]  # e.g. tpu-v6e-preemptible
-    for dim in q.get("dimensionsInfos", []):
-        dims = dim.get("dimensions", {})
-        # Only rows anchored to a real zone (skip region-level dupes and GLOBAL).
-        zone = dims.get("zone")
-        if not zone:
-            continue
-        value = dim.get("details", {}).get("value")
-        if value is None:
-            continue
-        try:
-            ival = int(value)
-        except (TypeError, ValueError):
-            continue
-        # -1 means "no explicit limit"; skip the noise, show real positive caps.
-        if ival <= 0:
-            continue
-        rows.append((accel, zone, ival))
+# Keep this mapping aligned with quota_groups/resources in resources.yaml.
+queue_quotas = [
+    ("v4",   "v4 spot",      "tpu.googleapis.com/tpu-v4s-pod-preemptible", "us-central2-b"),
+    ("v4od", "v4 on-demand", "tpu.googleapis.com/tpu-v4s-pod",             "us-central2-b"),
+    ("v6",   "v6e spot",     "tpu.googleapis.com/tpu-v6e-preemptible",     "us-east1-d"),
+    ("v5",   "v5e spot",     "tpu.googleapis.com/tpu-v5s-litepod-preemptible", "us-central1-a"),
+    ("v6eu", "v6e spot",     "tpu.googleapis.com/tpu-v6e-preemptible",     "europe-west4-a"),
+    ("v5eu", "v5e spot",     "tpu.googleapis.com/tpu-v5s-litepod-preemptible", "europe-west4-b"),
+]
 
-if not rows:
-    print("  No zone-anchored positive TPU quotas found.")
-    print("  (You may lack cloudquotas.viewer, or none are set on this project.)")
-    sys.exit(0)
+def effective_limit(metric, dimension, location):
+    item = metrics.get(metric, {})
+    for limit in item.get("consumerQuotaLimits", []):
+        for bucket in limit.get("quotaBuckets", []):
+            if (bucket.get("dimensions") or {}).get(dimension) == location:
+                return bucket.get("effectiveLimit")
+    return None
 
-rows.sort(key=lambda r: (r[0], r[1]))
-head = "  %-26s %-18s %12s" % ("ACCELERATOR", "ZONE", "QUOTA(chips)")
-print(head)
-print("  %-26s %-18s %12s" % ("-"*26, "-"*18, "-"*12))
-for accel, zone, val in rows:
-    print("  %-26s %-18s %12d" % (accel, zone, val))
+def default_zone_limit(metric):
+    item = metrics.get(metric, {})
+    for limit in item.get("consumerQuotaLimits", []):
+        if "{zone}" not in limit.get("unit", ""):
+            continue
+        for bucket in limit.get("quotaBuckets", []):
+            if not (bucket.get("dimensions") or {}):
+                return bucket.get("effectiveLimit")
+    return None
+
+def shown(value):
+    if value is None:
+        return "not found"
+    if value == -1:
+        return "unlimited"
+    return str(value)
+
+print("  %-6s %-14s %-18s %12s %14s" %
+      ("GROUP", "TYPE", "ZONE", "ZONE LIMIT", "REGION LIMIT"))
+print("  %-6s %-14s %-18s %12s %14s" %
+      ("-" * 6, "-" * 14, "-" * 18, "-" * 12, "-" * 14))
+for group, kind, metric, zone in queue_quotas:
+    region = zone.rsplit("-", 1)[0]
+    zone_limit = effective_limit(metric, "zone", zone)
+    region_limit = effective_limit(metric, "region", region)
+    print("  %-6s %-14s %-18s %12s %14s" %
+          (group, kind, zone, shown(zone_limit), shown(region_limit)))
+
+print()
+print("  Separate v5e serving quotas (not queue training quota groups):")
+for kind, metric in [
+    ("spot serving", "tpu.googleapis.com/tpu-v5s-litepod-serving-preemptible"),
+    ("on-demand serving", "tpu.googleapis.com/tpu-v5s-litepod-serving"),
+]:
+    print("    %-18s default per-zone effective limit: %s" %
+          (kind, shown(default_zone_limit(metric))))
 '
 
 echo

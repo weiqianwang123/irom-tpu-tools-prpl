@@ -71,6 +71,17 @@ class UserLimitConfig:
 
 
 @dataclass(frozen=True)
+class StorageAuditConfig:
+    buckets: tuple[str, ...] = ()
+    report_url: str = ""
+    default_limit_bytes: int = 1_000_000_000_000
+    users: dict[str, int] = field(default_factory=dict)
+
+    def limit_bytes_for(self, user: str) -> int:
+        return self.users.get(user, self.default_limit_bytes)
+
+
+@dataclass(frozen=True)
 class InteractiveTPUConfig:
     name: str
     version: str
