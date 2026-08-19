@@ -354,7 +354,7 @@ of irreplaceable source data.
 
 ## Incident record: scheduler cold-start reconciliation (2026-08-19)
 
-After restarting the scheduler to correct the v5e Spot request flags, its
+After restarting the scheduler while investigating the v5e Spot request flags, its
 cold-start scan launched eight concurrent `gcloud storage` readers on the
 two-vCPU scheduler VM. Some reads reached the 15-second timeout. The backend
 represented both a missing object and a failed read as `None`, so four old
@@ -433,16 +433,24 @@ update this table and the matching `quota_groups.*.total_chips` value in
 Do not confuse the normal v5e Spot metric above with the separate serving
 metrics. The current default per-zone limits for
 `tpu-v5s-litepod-serving-preemptible` and `tpu-v5s-litepod-serving` are both 4.
-The earlier `Limit: 4` error named the serving-preemptible metric; it did not
-show that the queue's normal `v5` training quota had fallen from 64 to 4. The
-2026-08-19 incident was traced to the scheduler using the alpha create command
-with both `--provisioning-model SPOT` and `--spot`. Removing only the provisioning
-model was also insufficient: that alpha command defaulted the node model to
-`STANDARD`, which the API rejected as incompatible with Spot. The queue now uses
-Google's documented GA command, `gcloud compute tpus queued-resources create
-... --spot`, which sends the queued-resource Spot field without the conflicting
-node provisioning model. This was corrected without changing the scheduler's
-`v5` quota group.
+The `Limit: 4` error names the serving-preemptible metric, not the configured
+64-chip v5 training metric. Live tests on 2026-08-19 showed that this distinction
+cannot currently be bypassed with scheduler flags: Google's documented GA
+`... queued-resources create --spot`, the legacy v2alpha1 Spot payload, and a
+best-effort/preemptible payload were all enforced against the 4-chip serving
+quota for `v5litepod-8`. A `v5litepod-4` probe was separately rejected because
+this project is not permitted to submit that accelerator type. Therefore an
+8-chip v5e queued resource requires Google to raise
+`TPUV5sPreemptibleLitepodServingPerProjectPerZoneForTPUAPI` from 4 to at least 8;
+the 64-chip metric displayed for `v5` does not make the current request
+schedulable. Until Google corrects the quota assignment/routing, use a permitted
+v4 or v6 resource instead of leaving v5 jobs pending.
+
+The scheduler still uses the documented GA command. The alpha command with only
+`--spot` defaulted the node provisioning model to `STANDARD` and was rejected as
+incompatible, while adding `--provisioning-model SPOT` did not avoid the serving
+quota. Keep the live probe result and the named quota violation as the source of
+truth when the configured quota table and API enforcement disagree.
 
 Quota is a ceiling, not availability. GCP does not expose real-time spot
 capacity through any API. Whether a specific size can be provisioned right now

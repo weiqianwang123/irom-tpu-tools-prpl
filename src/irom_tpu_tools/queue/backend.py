@@ -201,10 +201,9 @@ class GCPBackend(Backend):
             "--async",
         ]
         if spot:
-            # Use the documented GA queued-resource command and its legacy
-            # `spot` field for training VMs. The alpha command also sends a
-            # node provisioningModel; SPOT can hit serving quota, while its
-            # STANDARD default is incompatible with a spot queued resource.
+            # Use Google's documented GA queued-resource command. The alpha
+            # command also sends a node provisioningModel and rejects this
+            # legacy Spot request when it defaults that model to STANDARD.
             cmd.append("--spot")
         if service_account:
             cmd.extend(["--service-account", service_account])

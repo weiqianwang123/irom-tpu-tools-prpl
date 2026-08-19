@@ -326,7 +326,7 @@ class SchedulerTests(unittest.TestCase):
             )
         )
 
-    def test_gcp_spot_create_uses_training_spot_flag_only(self) -> None:
+    def test_gcp_spot_create_uses_documented_ga_command(self) -> None:
         backend = GCPBackend()
         run = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
         backend._run = run
